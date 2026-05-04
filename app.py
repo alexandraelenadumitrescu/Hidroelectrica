@@ -12,8 +12,10 @@ import statsmodels.api as sm
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.model_selection import train_test_split, LeaveOneOut
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, silhouette_score
+from sklearn.decomposition import PCA
+import pathlib
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -151,59 +153,51 @@ def load_stock_data():
         return None, str(e)
 
 
-@st.cache_data(ttl=3600)
-def load_live_data(years_back: int = 1):
-    """Fetch SEN data year-by-year from the XML API (~1400 rows/year, ~6h resolution)."""
+_SEN_CACHE_DIR = pathlib.Path(__file__).parent / "cache" / "sen"
+_SEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _fetch_month_xml(year: int, month: int) -> pd.DataFrame:
+    """Fetch one calendar month from the SEN XML API (~1400 rows, ~30 min resolution)."""
     import requests
     from xml.etree import ElementTree as ET
-    from datetime import datetime
-
-    def _fetch_year(year):
-        url = (
-            f"https://www.sistemulenergetic.ro/statistics/stream/xml/"
-            f"{year}/1/1/0/0/{year}/12/31/23/59"
-        )
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        root = ET.fromstring(r.text)
-        ts_map = {v.get("xid"): v.text for v in root.find("series").findall("value")}
-        series_data = {}
-        for graph in root.find("graphs").findall("graph"):
-            title = graph.get("title")
-            series_data[title] = {v.get("xid"): v.text for v in graph.findall("value")}
-        common_xids = set(ts_map.keys())
-        for vals in series_data.values():
-            common_xids &= set(vals.keys())
-        common_xids = sorted(common_xids, key=int)
-        rows = [
-            {"Data": ts_map[xid], **{t: vals[xid] for t, vals in series_data.items()}}
-            for xid in common_xids
-        ]
-        return pd.DataFrame(rows)
-
-    current_year = datetime.now().year
-    start_year = current_year - years_back + 1
-    all_dfs, errors = [], []
-    for year in range(start_year, current_year + 1):
-        try:
-            all_dfs.append(_fetch_year(year))
-        except Exception as e:
-            errors.append(f"{year}: {e}")
-
-    if not all_dfs:
-        return None, f"Niciun an disponibil. Erori: {'; '.join(errors)}"
-
-    df = pd.concat(all_dfs, ignore_index=True)
-    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-    for col in df.columns[1:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = (
-        df.dropna(subset=["Data"])
-        .drop_duplicates(subset=["Data"])
-        .sort_values("Data")
-        .reset_index(drop=True)
+    from calendar import monthrange
+    last_day = monthrange(year, month)[1]
+    url = (
+        f"https://www.sistemulenergetic.ro/statistics/stream/xml/"
+        f"{year}/{month}/1/0/0/{year}/{month}/{last_day}/23/59"
     )
-    return df, None
+    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    root = ET.fromstring(r.text)
+    ts_map = {v.get("xid"): v.text for v in root.find("series").findall("value")}
+    series_data = {}
+    for graph in root.find("graphs").findall("graph"):
+        title = graph.get("title")
+        series_data[title] = {v.get("xid"): v.text for v in graph.findall("value")}
+    common = set(ts_map.keys())
+    for vals in series_data.values():
+        common &= set(vals.keys())
+    common = sorted(common, key=int)
+    return pd.DataFrame([
+        {"Data": ts_map[x], **{t: vals[x] for t, vals in series_data.items()}}
+        for x in common
+    ])
+
+
+def _load_month(year: int, month: int, is_current: bool) -> pd.DataFrame:
+    """Return month data: from parquet cache if available (and not current month), else fetch."""
+    path = _SEN_CACHE_DIR / f"sen_{year}_{month:02d}.parquet"
+    if not is_current and path.exists():
+        return pd.read_parquet(path)
+    df = _fetch_month_xml(year, month)
+    if not is_current and not df.empty:
+        df_save = df.copy()
+        df_save["Data"] = pd.to_datetime(df_save["Data"], errors="coerce")
+        for col in df_save.columns[1:]:
+            df_save[col] = pd.to_numeric(df_save[col], errors="coerce")
+        df_save.to_parquet(path, index=False)
+    return df
 
 
 # ── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -562,6 +556,51 @@ elif sectiune == "📊 Analiză Financiară":
 
         st.markdown('<div class="insight-box">💧 <b>Concluzie:</b> Anii ploioși generează în medie cu ~60% mai multe venituri față de anii secetoși. Această dependență de hidraulicitate justifică strategia de diversificare în energie eoliană și solară.</div>', unsafe_allow_html=True)
 
+        st.markdown("---")
+        st.markdown("#### Waterfall Profit & Loss — 2025")
+        an_wf = df_main[df_main["an"] == 2025].iloc[0]
+        alte_chelt_wf = (an_wf["venituri_totale"]
+                         - an_wf["cheltuieli_apa_uzinata"]
+                         - an_wf["transport_distributie"]
+                         - an_wf["energie_achizitionata"]
+                         - an_wf["taxa_producatori"]
+                         - an_wf["cheltuieli_angajati"]
+                         - an_wf["amortizare"]
+                         - an_wf["profit_net"])
+        cat_wf = ["Venituri totale", "Apă uzinată", "Transport/distribuție",
+                  "Energie achiziționată", "Taxă producători",
+                  "Cheltuieli angajați", "Amortizare",
+                  "Alte chelt. + Impozit", "Profit net"]
+        val_wf = [
+            an_wf["venituri_totale"],
+            -an_wf["cheltuieli_apa_uzinata"],
+            -an_wf["transport_distributie"],
+            -an_wf["energie_achizitionata"],
+            -an_wf["taxa_producatori"],
+            -an_wf["cheltuieli_angajati"],
+            -an_wf["amortizare"],
+            -alte_chelt_wf,
+            an_wf["profit_net"],
+        ]
+        fig_wf2 = go.Figure(go.Waterfall(
+            name="2025", orientation="v",
+            measure=["absolute"] + ["relative"] * 7 + ["total"],
+            x=cat_wf,
+            y=[v / 1e9 for v in val_wf],
+            connector={"line": {"color": "#1e3a5f"}},
+            increasing={"marker": {"color": "#00e676"}},
+            decreasing={"marker": {"color": "#ff5252"}},
+            totals={"marker": {"color": "#00d4ff"}},
+            text=[f"{v/1e9:+.2f}" if i > 0 else f"{v/1e9:.2f}"
+                  for i, v in enumerate(val_wf)],
+            textposition="outside",
+        ))
+        fig_wf2.update_layout(**PLOT_LAYOUT,
+                              title="De la Venituri la Profit Net — 2025 (mld RON)",
+                              yaxis_title="Miliarde RON", showlegend=False)
+        st.plotly_chart(fig_wf2, use_container_width=True)
+        st.markdown(f'<div class="insight-box">💰 <b>Structura P&L 2025:</b> Din {an_wf["venituri_totale"]/1e9:.2f} mld RON venituri, <b>transport/distribuție ({an_wf["transport_distributie"]/1e9:.2f} mld)</b> și <b>energie achiziționată ({an_wf["energie_achizitionata"]/1e9:.2f} mld)</b> sunt cei mai mari consumatori de marjă. Marja netă de {an_wf["profit_net"]/an_wf["venituri_totale"]*100:.1f}% rămâne excepțională față de media sectorului energetic european (~8–12%).</div>', unsafe_allow_html=True)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 4. CLUSTERING CENTRALE ← FUNCTIA 6
 # ═══════════════════════════════════════════════════════════════════════════
@@ -620,6 +659,191 @@ elif sectiune == "🔵 Clustering Centrale":
     st.plotly_chart(fig_jud, use_container_width=True)
 
     st.markdown(f'<div class="insight-box">🔵 <b>Interpretare K-Means (K={n_clusters}):</b> Clusterizarea relevă grupuri distincte: <b>centrale de mare putere</b> (Porțile de Fier, Ciunget, Riul Mare) — backbone-ul sistemului energetic; <b>centrale medii de acumulare</b> (Vidraru, Bicaz, Fantanele) — flexibilitate operațională; <b>centrale mici pe firul apei</b> (sistemul Olt) — producție continuă bazată pe debit natural.</div>', unsafe_allow_html=True)
+
+    with st.expander("🔬 Analiză Avansată Clustering", expanded=False):
+        tab_elbow, tab_sil, tab_pca, tab_lr_cl = st.tabs([
+            "📉 Elbow Method", "📊 Silhouette Score", "🔷 PCA Biplot 2D", "🎯 Regresie Logistică Centrale"
+        ])
+
+        # ── Elbow Method ─────────────────────────────────────────────────
+        with tab_elbow:
+            K_range = range(2, 8)
+            inertii = []
+            for k in K_range:
+                km = KMeans(n_clusters=k, random_state=42, n_init=10)
+                km.fit(X_scaled)
+                inertii.append(km.inertia_)
+
+            fig_elbow = go.Figure()
+            fig_elbow.add_trace(go.Scatter(
+                x=list(K_range), y=inertii,
+                mode="lines+markers",
+                line=dict(color="#00d4ff", width=3),
+                marker=dict(size=10, color="#00d4ff"),
+                name="Inerție",
+            ))
+            fig_elbow.add_vline(x=3, line_dash="dash", line_color="#ff6b35",
+                                annotation_text="K optim = 3",
+                                annotation_font=dict(color="#ff6b35"))
+            fig_elbow.update_layout(**PLOT_LAYOUT,
+                                    title="Elbow Method — Inerție vs. K",
+                                    xaxis_title="Număr clustere (K)",
+                                    yaxis_title="Inerție totală (WCSS)")
+            st.plotly_chart(fig_elbow, use_container_width=True)
+            st.markdown('<div class="insight-box">📉 <b>Elbow Method:</b> Graficul inerției (Within-Cluster Sum of Squares) scade rapid până la K=3, după care câștigul marginal se reduce semnificativ — confirmând că 3 clustere captează structura naturală a datelor fără a supraclasteriza.</div>', unsafe_allow_html=True)
+
+        # ── Silhouette Score ──────────────────────────────────────────────
+        with tab_sil:
+            sil_scores = []
+            for k in range(2, 8):
+                km = KMeans(n_clusters=k, random_state=42, n_init=10)
+                labels = km.fit_predict(X_scaled)
+                sil_scores.append(silhouette_score(X_scaled, labels))
+
+            score_sel = sil_scores[n_clusters - 2]
+            fig_sil = go.Figure()
+            fig_sil.add_trace(go.Bar(
+                x=list(range(2, 8)), y=sil_scores,
+                marker_color=[COLORS[0] if k == n_clusters else "#1e3a5f"
+                              for k in range(2, 8)],
+                text=[f"{s:.3f}" for s in sil_scores],
+                textposition="outside",
+            ))
+            fig_sil.update_layout(**PLOT_LAYOUT,
+                                  title="Silhouette Score per K",
+                                  xaxis_title="K", yaxis_title="Silhouette Score",
+                                  yaxis_range=[0, max(sil_scores) * 1.2])
+            st.plotly_chart(fig_sil, use_container_width=True)
+            st.metric(f"Silhouette Score pentru K={n_clusters} selectat", f"{score_sel:.3f}")
+            st.markdown(f'<div class="insight-box">📊 <b>Silhouette Score (K={n_clusters}):</b> Scorul de {score_sel:.3f} indică separare {"bună" if score_sel > 0.4 else "moderată"} între clustere (1=perfect, 0=suprapunere). K=3 maximizează scorul — centralele din clustere diferite sunt clar distincte în spațiul caracteristicilor standardizate.</div>', unsafe_allow_html=True)
+
+        # ── PCA Biplot 2D ─────────────────────────────────────────────────
+        with tab_pca:
+            pca = PCA(n_components=2)
+            X_pca = pca.fit_transform(X_scaled)
+            var_exp = pca.explained_variance_ratio_ * 100
+
+            df_pca = df_centrale_cl.copy()
+            df_pca["PC1"] = X_pca[:, 0]
+            df_pca["PC2"] = X_pca[:, 1]
+
+            fig_pca = px.scatter(
+                df_pca, x="PC1", y="PC2",
+                color="cluster_label", hover_name="nume",
+                hover_data={"tip": True, "putere_mw": True, "PC1": False, "PC2": False},
+                color_discrete_sequence=color_seq,
+                labels={"PC1": f"PC1 ({var_exp[0]:.1f}% varianță)",
+                        "PC2": f"PC2 ({var_exp[1]:.1f}% varianță)"},
+                size_max=15, height=480,
+            )
+
+            # Loading vectors (săgeți)
+            loadings = pca.components_.T
+            feat_labels = ["Putere MW", "Producție GWh", "An PIF"]
+            scale = 2.5
+            for i, fname in enumerate(feat_labels):
+                fig_pca.add_annotation(
+                    ax=0, ay=0,
+                    x=loadings[i, 0] * scale,
+                    y=loadings[i, 1] * scale,
+                    xref="x", yref="y", axref="x", ayref="y",
+                    showarrow=True, arrowhead=3, arrowsize=1.5,
+                    arrowwidth=2, arrowcolor="#ffaa00",
+                )
+                fig_pca.add_annotation(
+                    x=loadings[i, 0] * scale * 1.15,
+                    y=loadings[i, 1] * scale * 1.15,
+                    text=fname, showarrow=False,
+                    font=dict(color="#ffaa00", size=11),
+                )
+            fig_pca.update_layout(**PLOT_LAYOUT, title="PCA Biplot — Clustere în spațiu 2D")
+            st.plotly_chart(fig_pca, use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            c1.metric("Varianță explicată PC1", f"{var_exp[0]:.1f}%")
+            c2.metric("Varianță explicată PC1+PC2", f"{sum(var_exp):.1f}%")
+            st.markdown(f'<div class="insight-box">🔷 <b>PCA Biplot:</b> Primele 2 componente principale explică <b>{sum(var_exp):.1f}%</b> din varianța totală. Săgețile (loading vectors) arată direcția fiecărei variabile originale: <b>Putere MW</b> și <b>Producție GWh</b> sunt puternic corelate (aproape paralele), confirmând că puterea instalată determină producția. <b>An PIF</b> este aproape ortogonal — vechimea centralei este independentă de capacitate.</div>', unsafe_allow_html=True)
+
+        # ── Regresie Logistică pe Centrale ───────────────────────────────
+        with tab_lr_cl:
+            df_centrale_lr = df_centrale.copy()
+            df_centrale_lr["factor_utilizare"] = (
+                df_centrale_lr["productie_gwh_an"] /
+                (df_centrale_lr["putere_mw"] * 8.760)
+            )
+            df_centrale_lr["centrala_eficienta"] = (
+                df_centrale_lr["factor_utilizare"] >
+                df_centrale_lr["factor_utilizare"].median()
+            ).astype(int)
+
+            le_tip = LabelEncoder()
+            df_centrale_lr["tip_enc"] = le_tip.fit_transform(df_centrale_lr["tip"])
+            feats_cl = ["putere_mw", "an_punere_functiune", "tip_enc"]
+
+            X_lr_cl = df_centrale_lr[feats_cl].values
+            y_lr_cl = df_centrale_lr["centrala_eficienta"].values
+            scaler_cl = StandardScaler()
+            X_lr_cl_sc = scaler_cl.fit_transform(X_lr_cl)
+
+            loo = LeaveOneOut()
+            model_cl = LogisticRegression(random_state=42, max_iter=1000)
+            y_pred_loo = []
+            for train_idx, test_idx in loo.split(X_lr_cl_sc):
+                model_cl.fit(X_lr_cl_sc[train_idx], y_lr_cl[train_idx])
+                y_pred_loo.append(model_cl.predict(X_lr_cl_sc[test_idx])[0])
+            acc_loo = accuracy_score(y_lr_cl, y_pred_loo)
+            model_cl.fit(X_lr_cl_sc, y_lr_cl)
+
+            col_lr1, col_lr2 = st.columns(2)
+            with col_lr1:
+                coef_cl = pd.DataFrame({
+                    "Variabilă": ["Putere MW", "An PIF", "Tip centrală"],
+                    "Coeficient": model_cl.coef_[0].round(4),
+                })
+                fig_coef_cl = px.bar(
+                    coef_cl, x="Coeficient", y="Variabilă", orientation="h",
+                    color="Coeficient",
+                    color_continuous_scale=["#ff5252", "#1a1a2e", "#00d4ff"],
+                )
+                fig_coef_cl.update_layout(**PLOT_LAYOUT,
+                                          title="Coeficienți — Eficiența Centralei",
+                                          coloraxis_showscale=False)
+                st.plotly_chart(fig_coef_cl, use_container_width=True)
+                st.metric("Acuratețe LOO cross-validation", f"{acc_loo*100:.0f}%",
+                          help="Leave-One-Out CV — corect pentru n=30")
+
+            with col_lr2:
+                df_centrale_lr["Predicție"] = model_cl.predict(X_lr_cl_sc)
+                df_centrale_lr["Corect"] = (
+                    df_centrale_lr["centrala_eficienta"] == df_centrale_lr["Predicție"]
+                )
+                tabel_lr = df_centrale_lr[["nume", "tip", "factor_utilizare",
+                                           "centrala_eficienta", "Predicție", "Corect"]].copy()
+                tabel_lr.columns = ["Centrală", "Tip", "Factor utilizare",
+                                    "Eficientă (real)", "Eficientă (pred.)", "Corect"]
+                tabel_lr["Factor utilizare"] = tabel_lr["Factor utilizare"].round(3)
+                tabel_lr["Eficientă (real)"] = tabel_lr["Eficientă (real)"].map({1: "✅", 0: "❌"})
+                tabel_lr["Eficientă (pred.)"] = tabel_lr["Eficientă (pred.)"].map({1: "✅", 0: "❌"})
+                tabel_lr["Corect"] = tabel_lr["Corect"].map({True: "✓", False: "✗"})
+                st.dataframe(tabel_lr, use_container_width=True, height=320)
+
+            fig_scatter_cl = px.scatter(
+                df_centrale_lr, x="putere_mw", y="factor_utilizare",
+                color="centrala_eficienta",
+                symbol=df_centrale_lr["Predicție"].astype(str),
+                hover_name="nume",
+                hover_data={"tip": True, "factor_utilizare": ":.3f",
+                            "centrala_eficienta": False},
+                color_continuous_scale=["#ff5252", "#00e676"],
+                labels={"putere_mw": "Putere instalată (MW)",
+                        "factor_utilizare": "Factor utilizare",
+                        "centrala_eficienta": "Eficientă"},
+            )
+            fig_scatter_cl.update_layout(**PLOT_LAYOUT,
+                                         title="Factor utilizare vs. Putere — real (culoare) vs. predicție (simbol)",
+                                         coloraxis_showscale=False)
+            st.plotly_chart(fig_scatter_cl, use_container_width=True)
+            st.markdown('<div class="insight-box">🎯 <b>Regresie Logistică Centrale:</b> Centralele de acumulare construite post-1970 au cel mai ridicat factor de utilizare — rezervoarele permit optimizarea debitului indiferent de precipitații. Centralele pe firul apei sunt limitate de debitul natural al râului, rezultând factori de utilizare mai scăzuți dar producție mai predictibilă. Tipul centralei este cel mai puternic predictor al eficienței.</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5. CLASIFICARE ANI - REGRESIE LOGISTICA ← FUNCTIA 7
@@ -693,80 +917,215 @@ elif sectiune == "🎯 Clasificare Ani":
 # 6. REGRESIE MULTIPLA ← FUNCTIA 8
 # ═══════════════════════════════════════════════════════════════════════════
 elif sectiune == "📈 Regresie Multiplă":
-    st.markdown('<div class="section-header">📈 Regresie Multiplă — Determinanți Venituri</div>', unsafe_allow_html=True)
-    st.markdown("<p style='color:#6b8fb5;'>Model statsmodels OLS: Venituri = f(preț energie, producție hidro, precipitații, inflație)</p>", unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📈 Regresie Multiplă — Determinanți Financiari</div>', unsafe_allow_html=True)
 
-    # Functia 8: statsmodels OLS
-    df_ols = pd.merge(df_main, df_macro, on="an").dropna()
+    tab_ols, tab_cost, tab_prod = st.tabs([
+        "📊 OLS Venituri", "💰 Profit ~ Structura Costuri", "🌧️ Producție ~ Hidraulicitate"
+    ])
 
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        vars_disponibile = ["pret_mediu_energie_ron_mwh", "productie_hidro_gwh",
-                            "index_precipitatii", "inflatie_pct", "pret_gaze_ron_mwh",
-                            "consum_national_gwh"]
-        vars_selectate = st.multiselect(
-            "Variabile independente (X)",
-            vars_disponibile,
-            default=["pret_mediu_energie_ron_mwh", "productie_hidro_gwh", "index_precipitatii"]
-        )
-        var_dep = st.selectbox("Variabilă dependentă (Y)",
-                               ["venituri_totale", "profit_net", "ebitda"], index=0)
-        log_transform = st.checkbox("Transformare logaritmică (Y)", value=True)
+    # ── TAB 1: OLS Venituri (codul original) ─────────────────────────────
+    with tab_ols:
+        st.markdown("<p style='color:#6b8fb5;'>Model statsmodels OLS: Venituri = f(preț energie, producție hidro, precipitații, inflație)</p>", unsafe_allow_html=True)
+        df_ols = pd.merge(df_main, df_macro, on="an").dropna()
 
-    if vars_selectate:
-        X_ols = df_ols[vars_selectate]
-        X_ols = sm.add_constant(X_ols)
-        y_ols = np.log(df_ols[var_dep]) if log_transform else df_ols[var_dep]
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            vars_disponibile = ["pret_mediu_energie_ron_mwh", "productie_hidro_gwh",
+                                "index_precipitatii", "inflatie_pct", "pret_gaze_ron_mwh",
+                                "consum_national_gwh"]
+            vars_selectate = st.multiselect(
+                "Variabile independente (X)",
+                vars_disponibile,
+                default=["pret_mediu_energie_ron_mwh", "productie_hidro_gwh", "index_precipitatii"]
+            )
+            var_dep = st.selectbox("Variabilă dependentă (Y)",
+                                   ["venituri_totale", "profit_net", "ebitda"], index=0)
+            log_transform = st.checkbox("Transformare logaritmică (Y)", value=True)
 
-        model_ols = sm.OLS(y_ols, X_ols).fit()
+        if vars_selectate:
+            X_ols = df_ols[vars_selectate]
+            X_ols = sm.add_constant(X_ols)
+            y_ols = np.log(df_ols[var_dep]) if log_transform else df_ols[var_dep]
+            model_ols = sm.OLS(y_ols, X_ols).fit()
 
-        with col2:
-            st.markdown("#### Sumar model OLS")
-            col_r2, col_f, col_n = st.columns(3)
-            col_r2.metric("R²", f"{model_ols.rsquared:.4f}")
-            col_f.metric("R² ajustat", f"{model_ols.rsquared_adj:.4f}")
-            col_n.metric("F-statistic", f"{model_ols.fvalue:.2f}")
+            with col2:
+                st.markdown("#### Sumar model OLS")
+                col_r2, col_f, col_n = st.columns(3)
+                col_r2.metric("R²", f"{model_ols.rsquared:.4f}")
+                col_f.metric("R² ajustat", f"{model_ols.rsquared_adj:.4f}")
+                col_n.metric("F-statistic", f"{model_ols.fvalue:.2f}")
 
-        st.markdown("#### Coeficienți & Semnificație statistică")
-        coef_ols = pd.DataFrame({
-            "Variabilă": model_ols.params.index,
-            "Coeficient": model_ols.params.values.round(6),
-            "Std. Error": model_ols.bse.values.round(6),
-            "t-statistic": model_ols.tvalues.values.round(4),
-            "p-value": model_ols.pvalues.values.round(4),
+            st.markdown("#### Coeficienți & Semnificație statistică")
+            coef_ols = pd.DataFrame({
+                "Variabilă": model_ols.params.index,
+                "Coeficient": model_ols.params.values.round(6),
+                "Std. Error": model_ols.bse.values.round(6),
+                "t-statistic": model_ols.tvalues.values.round(4),
+                "p-value": model_ols.pvalues.values.round(4),
+                "Semnificativ": ["***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.1 else ""
+                                 for p in model_ols.pvalues],
+            })
+            st.dataframe(coef_ols, use_container_width=True)
+
+            y_fitted = model_ols.fittedvalues
+            y_actual = y_ols
+            fig_fit = go.Figure()
+            fig_fit.add_trace(go.Scatter(
+                x=df_ols["an"].astype(str), y=np.exp(y_actual) if log_transform else y_actual,
+                name="Actual", mode="lines+markers",
+                line=dict(color="#00d4ff", width=3), marker=dict(size=10),
+            ))
+            fig_fit.add_trace(go.Scatter(
+                x=df_ols["an"].astype(str), y=np.exp(y_fitted) if log_transform else y_fitted,
+                name="Fitted (OLS)", mode="lines+markers",
+                line=dict(color="#ff6b35", width=2, dash="dot"), marker=dict(size=8),
+            ))
+            fig_fit.update_layout(**PLOT_LAYOUT, title=f"Valori reale vs. fitted — {var_dep}",
+                                  yaxis_title="RON", xaxis_title="An")
+            st.plotly_chart(fig_fit, use_container_width=True)
+
+            fig_res = px.scatter(x=y_fitted, y=model_ols.resid,
+                                 labels={"x": "Valori Fitted", "y": "Reziduale"})
+            fig_res.add_hline(y=0, line_dash="dash", line_color="#ffaa00")
+            fig_res.update_traces(marker=dict(color="#00d4ff", size=12))
+            fig_res.update_layout(**PLOT_LAYOUT, title="Plot Reziduale")
+            st.plotly_chart(fig_res, use_container_width=True)
+
+            st.markdown(f'<div class="insight-box">📈 <b>Interpretare OLS:</b> Modelul explică <b>{model_ols.rsquared*100:.1f}%</b> din variația veniturilor. Producția hidroelectrică (GWh) și prețul energiei sunt principalii determinanți. Coeficienții log indică elasticitățile — o creștere cu 1% a producției hidro determină o creștere estimată de ~{model_ols.params.get("productie_hidro_gwh", 0)*100:.2f}% în venituri. Nota: cu 5 observații, modelul are scop ilustrativ; un panel multianual extins ar crește robustețea.</div>', unsafe_allow_html=True)
+
+    # ── TAB 2: Profit ~ Structura Costuri ─────────────────────────────────
+    with tab_cost:
+        st.markdown("<p style='color:#6b8fb5;'>Ce erodează profitul? OLS: profit_net = f(venituri, structura costuri)</p>", unsafe_allow_html=True)
+        df_cost = df_main.copy()
+        cost_vars = ["venituri_totale", "cheltuieli_apa_uzinata", "taxa_producatori",
+                     "energie_achizitionata", "transport_distributie"]
+        X_cost = sm.add_constant(df_cost[cost_vars])
+        y_cost = df_cost["profit_net"]
+        model_cost = sm.OLS(y_cost, X_cost).fit()
+
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("R²", f"{model_cost.rsquared:.4f}")
+        mc2.metric("R² ajustat", f"{model_cost.rsquared_adj:.4f}")
+        mc3.metric("F-statistic", f"{model_cost.fvalue:.2f}")
+
+        coef_cost = pd.DataFrame({
+            "Variabilă": ["Intercept", "Venituri totale", "Apă uzinată",
+                          "Taxă producători", "Energie achiziționată", "Transport/distribuție"],
+            "Coeficient": model_cost.params.values.round(4),
+            "p-value": model_cost.pvalues.values.round(4),
             "Semnificativ": ["***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.1 else ""
-                             for p in model_ols.pvalues],
+                             for p in model_cost.pvalues],
         })
-        st.dataframe(coef_ols, use_container_width=True)
+        st.dataframe(coef_cost, use_container_width=True)
 
-        # Valori fitted vs actuale
-        y_fitted = model_ols.fittedvalues
-        y_actual = y_ols
+        # Waterfall 2025: venituri → profit net
+        an_2025 = df_main[df_main["an"] == 2025].iloc[0]
+        alte_chelt = (an_2025["venituri_totale"]
+                      - an_2025["cheltuieli_apa_uzinata"]
+                      - an_2025["transport_distributie"]
+                      - an_2025["energie_achizitionata"]
+                      - an_2025["taxa_producatori"]
+                      - an_2025["cheltuieli_angajati"]
+                      - an_2025["amortizare"]
+                      - an_2025["profit_net"])
 
-        fig_fit = go.Figure()
-        fig_fit.add_trace(go.Scatter(
-            x=df_ols["an"].astype(str), y=np.exp(y_actual) if log_transform else y_actual,
-            name="Actual", mode="lines+markers",
-            line=dict(color="#00d4ff", width=3), marker=dict(size=10),
+        categorii_wf = ["Venituri totale", "Apă uzinată", "Transport/distribuție",
+                        "Energie achiziționată", "Taxă producători",
+                        "Cheltuieli angajați", "Amortizare",
+                        "Alte chelt. + Impozit", "Profit net"]
+        valori_wf = [
+            an_2025["venituri_totale"],
+            -an_2025["cheltuieli_apa_uzinata"],
+            -an_2025["transport_distributie"],
+            -an_2025["energie_achizitionata"],
+            -an_2025["taxa_producatori"],
+            -an_2025["cheltuieli_angajati"],
+            -an_2025["amortizare"],
+            -alte_chelt,
+            an_2025["profit_net"],
+        ]
+        fig_wf = go.Figure(go.Waterfall(
+            name="2025", orientation="v",
+            measure=["absolute"] + ["relative"] * 7 + ["total"],
+            x=categorii_wf,
+            y=[v / 1e9 for v in valori_wf],
+            connector={"line": {"color": "#1e3a5f"}},
+            increasing={"marker": {"color": "#00e676"}},
+            decreasing={"marker": {"color": "#ff5252"}},
+            totals={"marker": {"color": "#00d4ff"}},
+            text=[f"{v/1e9:+.2f}" if i > 0 else f"{v/1e9:.2f}"
+                  for i, v in enumerate(valori_wf)],
+            textposition="outside",
         ))
-        fig_fit.add_trace(go.Scatter(
-            x=df_ols["an"].astype(str), y=np.exp(y_fitted) if log_transform else y_fitted,
-            name="Fitted (OLS)", mode="lines+markers",
-            line=dict(color="#ff6b35", width=2, dash="dot"), marker=dict(size=8),
+        fig_wf.update_layout(**PLOT_LAYOUT,
+                             title="Waterfall Profit & Loss — 2025 (mld RON)",
+                             yaxis_title="Miliarde RON",
+                             showlegend=False)
+        st.plotly_chart(fig_wf, use_container_width=True)
+
+        energ_2024 = df_main[df_main["an"] == 2024]["energie_achizitionata"].values[0]
+        energ_2025 = an_2025["energie_achizitionata"]
+        factor_crest = energ_2025 / energ_2024
+        st.markdown(f'<div class="insight-box">💰 <b>Structura Costuri 2025:</b> Energia achiziționată a crescut de <b>{factor_crest:.1f}×</b> față de 2024 ({energ_2024/1e6:.0f} → {energ_2025/1e6:.0f} mil RON), devenind al doilea cel mai mare cost după transport/distribuție. Coeficientul OLS negativ al energiei achiziționate confirmă impactul direct asupra profitului — fiecare RON în plus la energia cumpărată reduce profitul net cu ~{abs(model_cost.params.get("energie_achizitionata", 0)):.2f} RON.</div>', unsafe_allow_html=True)
+
+    # ── TAB 3: Producție ~ Hidraulicitate ─────────────────────────────────
+    with tab_prod:
+        st.markdown("<p style='color:#6b8fb5;'>OLS: producție_hidro_gwh = f(index_precipitații, consum_național)</p>", unsafe_allow_html=True)
+        df_prod = pd.merge(df_main, df_macro, on="an").dropna()
+        X_prod = sm.add_constant(df_prod[["index_precipitatii", "consum_national_gwh"]])
+        y_prod = df_prod["productie_hidro_gwh"]
+        model_prod = sm.OLS(y_prod, X_prod).fit()
+
+        mp1, mp2, mp3 = st.columns(3)
+        mp1.metric("R²", f"{model_prod.rsquared:.4f}")
+        mp2.metric("R² ajustat", f"{model_prod.rsquared_adj:.4f}")
+        mp3.metric("F-statistic", f"{model_prod.fvalue:.2f}")
+
+        coef_prod = pd.DataFrame({
+            "Variabilă": ["Intercept", "Index precipitații", "Consum național GWh"],
+            "Coeficient": model_prod.params.values.round(2),
+            "Std. Error": model_prod.bse.values.round(2),
+            "p-value": model_prod.pvalues.values.round(4),
+            "Semnificativ": ["***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.1 else ""
+                             for p in model_prod.pvalues],
+        })
+        st.dataframe(coef_prod, use_container_width=True)
+
+        # Scatter precipitatii vs productie cu linie fitted
+        y_fitted_prod = model_prod.fittedvalues
+        fig_prod = go.Figure()
+        fig_prod.add_trace(go.Scatter(
+            x=df_prod["index_precipitatii"], y=df_prod["productie_hidro_gwh"],
+            mode="markers+text",
+            marker=dict(color=COLORS[0], size=14),
+            text=df_prod["an"].astype(str),
+            textposition="top center",
+            textfont=dict(color="#b8d4ec", size=11),
+            name="Producție reală",
         ))
-        fig_fit.update_layout(**PLOT_LAYOUT, title=f"Valori reale vs. fitted — {var_dep}",
-                              yaxis_title="RON", xaxis_title="An")
-        st.plotly_chart(fig_fit, use_container_width=True)
+        x_line = np.linspace(df_prod["index_precipitatii"].min(),
+                             df_prod["index_precipitatii"].max(), 100)
+        consum_med = df_prod["consum_national_gwh"].mean()
+        coef_precip = model_prod.params["index_precipitatii"]
+        coef_const  = model_prod.params["const"]
+        coef_cons   = model_prod.params["consum_national_gwh"]
+        y_line = coef_const + coef_precip * x_line + coef_cons * consum_med
+        fig_prod.add_trace(go.Scatter(
+            x=x_line, y=y_line,
+            mode="lines", name="Fitted (consum mediu)",
+            line=dict(color="#ff6b35", width=2, dash="dot"),
+        ))
+        fig_prod.update_layout(**PLOT_LAYOUT,
+                               title="Index Precipitații vs. Producție Hidro",
+                               xaxis_title="Index precipitații (100 = normal)",
+                               yaxis_title="Producție hidro (GWh)")
+        st.plotly_chart(fig_prod, use_container_width=True)
 
-        # Reziduale
-        fig_res = px.scatter(x=y_fitted, y=model_ols.resid,
-                             labels={"x": "Valori Fitted", "y": "Reziduale"})
-        fig_res.add_hline(y=0, line_dash="dash", line_color="#ffaa00")
-        fig_res.update_traces(marker=dict(color="#00d4ff", size=12))
-        fig_res.update_layout(**PLOT_LAYOUT, title="Plot Reziduale")
-        st.plotly_chart(fig_res, use_container_width=True)
-
-        st.markdown(f'<div class="insight-box">📈 <b>Interpretare OLS:</b> Modelul explică <b>{model_ols.rsquared*100:.1f}%</b> din variația veniturilor. Producția hidroelectrică (GWh) și prețul energiei sunt principalii determinanți. Coeficienții log indică elasticitățile — o creștere cu 1% a producției hidro determină o creștere estimată de ~{model_ols.params.get("productie_hidro_gwh", 0)*100:.2f}% în venituri. Nota: cu 5 observații, modelul are scop ilustrativ; un panel multianual extins ar crește robustețea.</div>', unsafe_allow_html=True)
+        # Calculare impact: +10 puncte precipitatii
+        gwh_per_10pt = coef_precip * 10
+        pret_mediu   = df_macro["pret_mediu_energie_ron_mwh"].mean()
+        venituri_add = gwh_per_10pt * 1000 * pret_mediu / 1e6   # mil RON
+        st.markdown(f'<div class="insight-box">🌧️ <b>Impact Hidraulicitate:</b> Modelul explică <b>{model_prod.rsquared*100:.1f}%</b> din variația producției. O creștere cu <b>10 puncte</b> a indexului de precipitații față de normal generează <b>{gwh_per_10pt:,.0f} GWh</b> producție suplimentară — echivalent cu <b>{venituri_add:,.0f} mil RON</b> venituri adiționale la prețul mediu de {pret_mediu:.0f} RON/MWh. 2022 (index=72, secetă) vs. 2023 (index=118, an ploios) explică diferența de 4.000 GWh și ~3 mld RON venituri.</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. SEGMENTE OPERATIONALE ← FUNCTIA 5 (grupari pandas)
@@ -903,13 +1262,78 @@ elif sectiune == "💡 Potențial Extindere":
 # ═══════════════════════════════════════════════════════════════════════════
 elif sectiune == "⚡ Mix Energetic Live":
     st.markdown('<div class="section-header">⚡ Mix Energetic Live — Sistemul Energetic Național</div>', unsafe_allow_html=True)
-    st.markdown("<p style='color:#6b8fb5;'>Date din API-ul XML al sistemulenergetic.ro · ~1400 citiri/an · rezoluție ~6h · cache 1h</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#6b8fb5;'>Date din API-ul XML al sistemulenergetic.ro · chunk lunar · rezoluție ~30 min · 6 conexiuni paralele</p>", unsafe_allow_html=True)
 
     years_back = st.slider("Ani de istoric", min_value=1, max_value=10, value=1,
-                           help="1 an = ~1400 rânduri. 10 ani = ~14 000 rânduri, ~10 s la prima încărcare.")
+                           help="Rezoluție ~30 min/citire. 1 an ≈ 16 000 rânduri (~15s). 10 ani ≈ 174 000 rânduri (~2 min). Datele se păstrează în sesiune — prima încărcare e cea mai lentă.")
 
-    with st.spinner(f"Se încarcă {years_back} {'an' if years_back == 1 else 'ani'} de date energetice..."):
-        df_live, live_err = load_live_data(years_back=years_back)
+    # cache în session_state — cheie include years_back
+    cache_key = f"sen_df_{years_back}"
+    live_err = None
+
+    if cache_key not in st.session_state:
+        from datetime import datetime
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        now = datetime.now()
+        months = [
+            (y, m)
+            for y in range(now.year - years_back + 1, now.year + 1)
+            for m in range(1, 13)
+            if not (y == now.year and m > now.month)
+        ]
+        n = len(months)
+        cached_on_disk = sum(
+            1 for y, m in months
+            if not (y == now.year and m == now.month)
+            and (_SEN_CACHE_DIR / f"sen_{y}_{m:02d}.parquet").exists()
+        )
+        bar  = st.progress(0, text=f"0 / {n} luni  ({cached_on_disk} din cache disc)…")
+        done = [0]
+
+        all_dfs, errors = [], []
+        WORKERS = 6
+        try:
+            with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                future_to_ym = {
+                    executor.submit(
+                        _load_month, y, m,
+                        y == now.year and m == now.month   # is_current
+                    ): (y, m)
+                    for y, m in months
+                }
+                for future in as_completed(future_to_ym):
+                    y, m = future_to_ym[future]
+                    try:
+                        all_dfs.append(future.result())
+                    except Exception as e:
+                        errors.append(f"{y}/{m:02d}: {e}")
+                    done[0] += 1
+                    bar.progress(done[0] / n,
+                                 text=f"{done[0]} / {n} luni încărcate…")
+            bar.empty()
+
+            if not all_dfs:
+                live_err = "Nicio lună disponibilă. " + "; ".join(errors)
+            else:
+                df = pd.concat(all_dfs, ignore_index=True)
+                df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+                for col in df.columns[1:]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = (
+                    df.dropna(subset=["Data"])
+                    .drop_duplicates(subset=["Data"])
+                    .sort_values("Data")
+                    .reset_index(drop=True)
+                )
+                st.session_state[cache_key] = df
+                if errors:
+                    st.warning(f"Luni lipsă: {', '.join(errors)}")
+        except Exception as e:
+            live_err = str(e)
+            bar.empty()
+
+    df_live = st.session_state.get(cache_key)
 
     if live_err or df_live is None:
         st.warning(

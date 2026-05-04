@@ -1,0 +1,8 @@
+# Cache date SEN (parquet per lună — regenerabile din API)
+cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
