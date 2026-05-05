@@ -4,7 +4,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.cluster import KMeans
 from sklearn.model_selection import LeaveOneOut
@@ -41,69 +41,54 @@ X_ml     = df_ml[FEAT_NAMES].values
 y_ml     = df_ml["productie_gwh_an"].values
 y_ml_log = np.log1p(y_ml)
 
-sc       = StandardScaler()
-X_ml_sc  = sc.fit_transform(X_ml)
+sc      = StandardScaler()
+X_ml_sc = sc.fit_transform(X_ml)
 
 loo = LeaveOneOut()
 
-def _loo_eval(model, X, y_log, y_orig):
-    y_pred_log = np.zeros(len(y_log))
+def _loo_eval(model, X, y_train, y_orig, log_target=False):
+    y_pred_raw = np.zeros(len(y_train))
     for tr, te in loo.split(X):
-        model.fit(X[tr], y_log[tr])
-        y_pred_log[te] = model.predict(X[te])
-    model.fit(X, y_log)
-    y_pred = np.expm1(y_pred_log)
+        model.fit(X[tr], y_train[tr])
+        y_pred_raw[te] = model.predict(X[te])
+    model.fit(X, y_train)
+    y_pred = np.expm1(y_pred_raw) if log_target else y_pred_raw
     mae  = mean_absolute_error(y_orig, y_pred)
     rmse = mean_squared_error(y_orig, y_pred) ** 0.5
     r2   = r2_score(y_orig, y_pred)
     return y_pred, mae, rmse, r2
 
-print(f"n = {len(df_ml)}, pe_dunare = {df_ml['pe_dunare'].sum()} centrale")
-print(f"Portile de Fier: {df_ml[df_ml['pe_dunare']==1]['nume'].tolist()}")
-print()
+lr_model    = LinearRegression()
+ridge_model = Ridge(alpha=10.0)
+rf_model    = RandomForestRegressor(n_estimators=300, random_state=42, max_features="sqrt")
 
-lr_model = LinearRegression()
-rf_model = RandomForestRegressor(n_estimators=300, random_state=42, max_features="sqrt")
-
-y_lr, mae_lr, rmse_lr, r2_lr = _loo_eval(lr_model, X_ml_sc, y_ml_log, y_ml)
-y_rf, mae_rf, rmse_rf, r2_rf = _loo_eval(rf_model, X_ml_sc, y_ml_log, y_ml)
+y_lr,    mae_lr,    rmse_lr,    r2_lr    = _loo_eval(lr_model,    X_ml_sc, y_ml,     y_ml, log_target=False)
+y_ridge, mae_ridge, rmse_ridge, r2_ridge = _loo_eval(ridge_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
+y_rf,    mae_rf,    rmse_rf,    r2_rf    = _loo_eval(rf_model,    X_ml_sc, y_ml_log, y_ml, log_target=True)
 
 models = {
-    "Linear Regression": (y_lr, mae_lr, rmse_lr, r2_lr),
-    "Random Forest":     (y_rf, mae_rf, rmse_rf, r2_rf),
+    "Linear Regression":  (y_lr,    mae_lr,    rmse_lr,    r2_lr),
+    "Ridge (log, a=10)":  (y_ridge, mae_ridge, rmse_ridge, r2_ridge),
+    "Random Forest":      (y_rf,    mae_rf,    rmse_rf,    r2_rf),
 }
 
 if _XGB_OK:
     xgb_model = XGBRegressor(n_estimators=200, max_depth=3, learning_rate=0.1,
                               random_state=42, verbosity=0)
-    y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml_sc, y_ml_log, y_ml)
+    y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
     models["XGBoost"] = (y_xgb, mae_xgb, rmse_xgb, r2_xgb)
-else:
-    print("XGBoost not installed")
 
-print(f"{'Model':<22} {'R2 LOO':>8} {'MAE GWh':>10} {'RMSE GWh':>10}")
-print("-" * 52)
-for name, (y_pred, mae, rmse, r2) in models.items():
-    print(f"{name:<22} {r2:>8.3f} {mae:>10.1f} {rmse:>10.1f}")
+print(f"{'Model':<25} {'R2 LOO':>8} {'MAE GWh':>10} {'RMSE GWh':>10}")
+print("-" * 55)
+for name, (_, mae, rmse, r2) in models.items():
+    print(f"{name:<25} {r2:>8.3f} {mae:>10.1f} {rmse:>10.1f}")
 
 print()
-print("--- Portile de Fier I (outlier) ---")
+print("--- Portile de Fier I + II (outlieri) ---")
 idx_pdf = df_ml[df_ml["pe_dunare"] == 1].index.tolist()
 for i in idx_pdf:
     real = y_ml[i]
-    print(f"  {df_ml['nume'].iloc[i]:<30}  real={real:.0f} GWh")
+    print(f"\n  {df_ml['nume'].iloc[i]}  (real={real:.0f} GWh)")
     for name, (y_pred, _, _, _) in models.items():
         err = abs(real - y_pred[i])
-        print(f"    {name:<22}  pred={y_pred[i]:.0f}  err={err:.0f} ({err/real*100:.1f}%)")
-
-print()
-print("--- Feature importance ---")
-lr_model.fit(X_ml_sc, y_ml_log)
-imp_lr = np.abs(lr_model.coef_) / (np.abs(lr_model.coef_).sum() + 1e-9)
-rf_model.fit(X_ml_sc, y_ml_log)
-imp_rf = rf_model.feature_importances_
-
-print(f"{'Feature':<22} {'LR |coef|':>10} {'RF Gini':>10}")
-print("-" * 44)
-for feat, il, ir in zip(FEAT_LABELS, imp_lr, imp_rf):
-    print(f"{feat:<22} {il:>10.3f} {ir:>10.3f}")
+        print(f"    {name:<25}  pred={y_pred[i]:>6.0f}  err={err:>5.0f} ({err/real*100:.1f}%)")

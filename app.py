@@ -1443,7 +1443,12 @@ elif sectiune == "📈 Regresie Multiplă":
 
     # ── TAB 7: ML Predicție Producție per Centrală ────────────────────────
     with tab_ml_prod:
-        st.markdown("<p style='color:#6b8fb5;'>Target: <b>log(productie_gwh_an)</b> · Features: putere MW, an PIF, factor utilizare, pe_dunare, tip, cluster · n=30 centrale · LOO CV · predicții back-transformate în GWh</p>", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#6b8fb5;'>n=30 centrale · LOO CV · "
+            "<b>LR</b>: target GWh original · "
+            "<b>Ridge/RF/XGB</b>: target log(GWh), predicții back-transformate · "
+            "features: putere MW, an PIF, factor utilizare, pe_dunare, tip, cluster</p>",
+            unsafe_allow_html=True)
 
         # ── Build dataset ──────────────────────────────────────────────────
         df_ml = df_centrale.copy()
@@ -1454,7 +1459,6 @@ elif sectiune == "📈 Regresie Multiplă":
         le_ml = LabelEncoder()
         df_ml["tip_enc"] = le_ml.fit_transform(df_ml["tip"])
 
-        # K-Means cluster (K=4, same as default in Clustering section)
         _feats_km = ["putere_mw", "productie_gwh_an", "an_punere_functiune", "factor_utilizare"]
         _sc_km = StandardScaler()
         _X_km = _sc_km.fit_transform(df_ml[_feats_km])
@@ -1466,47 +1470,49 @@ elif sectiune == "📈 Regresie Multiplă":
         FEAT_LABELS = ["Putere MW", "An PIF", "Factor utilizare",
                        "Producție/MW", "Pe Dunăre", "Tip centrală", "Cluster K-Means"]
 
-        X_ml  = df_ml[FEAT_NAMES].values
-        y_ml  = df_ml["productie_gwh_an"].values
+        X_ml     = df_ml[FEAT_NAMES].values
+        y_ml     = df_ml["productie_gwh_an"].values
         y_ml_log = np.log1p(y_ml)
 
-        sc_ml    = StandardScaler()
-        X_ml_sc  = sc_ml.fit_transform(X_ml)
+        sc_ml   = StandardScaler()
+        X_ml_sc = sc_ml.fit_transform(X_ml)
 
-        # ── LOO CV in log space → back-transform → metrics in GWh ─────────
         loo_ml = LeaveOneOut()
 
-        def _loo_eval(model, X, y_log, y_orig):
-            y_pred_log = np.zeros(len(y_log))
+        def _loo_eval(model, X, y_train, y_orig, log_target=False):
+            y_pred_raw = np.zeros(len(y_train))
             for tr, te in loo_ml.split(X):
-                model.fit(X[tr], y_log[tr])
-                y_pred_log[te] = model.predict(X[te])
-            model.fit(X, y_log)          # refit full data for feature importance
-            y_pred = np.expm1(y_pred_log)
+                model.fit(X[tr], y_train[tr])
+                y_pred_raw[te] = model.predict(X[te])
+            model.fit(X, y_train)   # refit full data for feature importance
+            y_pred = np.expm1(y_pred_raw) if log_target else y_pred_raw
             mae  = mean_absolute_error(y_orig, y_pred)
             rmse = mean_squared_error(y_orig, y_pred) ** 0.5
             r2   = r2_score(y_orig, y_pred)
             return y_pred, mae, rmse, r2
 
-        lr_model = LinearRegression()
-        rf_model = RandomForestRegressor(n_estimators=300, random_state=42, max_features="sqrt")
+        lr_model    = LinearRegression()
+        ridge_model = Ridge(alpha=10.0)
+        rf_model    = RandomForestRegressor(n_estimators=300, random_state=42, max_features="sqrt")
 
-        y_lr, mae_lr, rmse_lr, r2_lr = _loo_eval(lr_model, X_ml_sc, y_ml_log, y_ml)
-        y_rf, mae_rf, rmse_rf, r2_rf = _loo_eval(rf_model, X_ml_sc, y_ml_log, y_ml)
+        y_lr,    mae_lr,    rmse_lr,    r2_lr    = _loo_eval(lr_model,    X_ml_sc, y_ml,     y_ml, log_target=False)
+        y_ridge, mae_ridge, rmse_ridge, r2_ridge = _loo_eval(ridge_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
+        y_rf,    mae_rf,    rmse_rf,    r2_rf    = _loo_eval(rf_model,    X_ml_sc, y_ml_log, y_ml, log_target=True)
 
         results = {
-            "Linear Regression": (y_lr, mae_lr, rmse_lr, r2_lr, "#6b8fb5"),
-            "Random Forest":     (y_rf, mae_rf, rmse_rf, r2_rf, "#00e676"),
+            "Linear Regression": (y_lr,    mae_lr,    rmse_lr,    r2_lr,    "#6b8fb5"),
+            "Ridge (log)":       (y_ridge, mae_ridge, rmse_ridge, r2_ridge, "#bb86fc"),
+            "Random Forest":     (y_rf,    mae_rf,    rmse_rf,    r2_rf,    "#00e676"),
         }
 
         if _XGB_OK:
             xgb_model = XGBRegressor(n_estimators=200, max_depth=3, learning_rate=0.1,
                                      random_state=42, verbosity=0)
-            y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml_sc, y_ml_log, y_ml)
+            y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
             results["XGBoost"] = (y_xgb, mae_xgb, rmse_xgb, r2_xgb, "#ffaa00")
 
         # ── Metrics comparison ────────────────────────────────────────────
-        st.markdown("#### Comparație modele — LOO CV · target log · metrici în GWh")
+        st.markdown("#### Comparație modele — LOO CV · metrici în GWh originali")
         cols_m = st.columns(len(results))
         for idx, (name, (_, mae, rmse, r2, col)) in enumerate(results.items()):
             with cols_m[idx]:
@@ -1539,7 +1545,7 @@ elif sectiune == "📈 Regresie Multiplă":
                 hovertemplate="<b>%{text}</b><br>Real: %{x:.0f} GWh<br>Pred.: %{y:.0f} GWh<extra></extra>",
             ))
         fig_avp.update_layout(**PLOT_LAYOUT,
-                              title="Real vs. Predicție — productie_gwh_an (LOO, back-transform din log)",
+                              title="Real vs. Predicție — productie_gwh_an (LOO CV)",
                               xaxis_title="Producție reală (GWh)",
                               yaxis_title="Producție prezisă (GWh)",
                               height=440)
@@ -1549,12 +1555,13 @@ elif sectiune == "📈 Regresie Multiplă":
         st.markdown("#### Feature Importance")
 
         fi_traces  = []
-        model_list = [("Linear Regression", lr_model, "#6b8fb5"),
-                      ("Random Forest",     rf_model, "#00e676")]
+        fi_models  = [("Linear Regression", lr_model,    "#6b8fb5"),
+                      ("Ridge (log)",       ridge_model, "#bb86fc"),
+                      ("Random Forest",     rf_model,    "#00e676")]
         if _XGB_OK:
-            model_list.append(("XGBoost", xgb_model, "#ffaa00"))
+            fi_models.append(("XGBoost", xgb_model, "#ffaa00"))
 
-        for name, model, color in model_list:
+        for name, model, color in fi_models:
             if hasattr(model, "feature_importances_"):
                 imp = model.feature_importances_
             else:
@@ -1563,9 +1570,9 @@ elif sectiune == "📈 Regresie Multiplă":
             fi_df = fi_df.sort_values("Importance", ascending=True)
             fi_traces.append((name, fi_df, color))
 
-        n_models = len(fi_traces)
-        fig_fi   = make_subplots(rows=1, cols=n_models,
-                                 subplot_titles=[t[0] for t in fi_traces])
+        n_fi    = len(fi_traces)
+        fig_fi  = make_subplots(rows=1, cols=n_fi,
+                                subplot_titles=[t[0] for t in fi_traces])
         for col_idx, (name, fi_df, color) in enumerate(fi_traces, start=1):
             fig_fi.add_trace(go.Bar(
                 x=fi_df["Importance"], y=fi_df["Feature"],
@@ -1576,10 +1583,10 @@ elif sectiune == "📈 Regresie Multiplă":
             ), row=1, col=col_idx)
         fig_fi.update_layout(
             **PLOT_LAYOUT,
-            title="Feature Importance per model (RF/XGB: Gini · LR: |coef| normalizat)",
+            title="Feature Importance (RF/XGB: Gini · LR/Ridge: |coef| normalizat)",
             height=420,
         )
-        for ax_idx in range(1, n_models + 1):
+        for ax_idx in range(1, n_fi + 1):
             fig_fi.update_xaxes(showgrid=False, row=1, col=ax_idx)
         st.plotly_chart(fig_fi, use_container_width=True)
 
@@ -1598,7 +1605,7 @@ elif sectiune == "📈 Regresie Multiplă":
                               xaxis_tickangle=-55, barmode="group", height=380)
         st.plotly_chart(fig_res, use_container_width=True)
 
-        st.markdown('<div class="insight-box">🤖 <b>ML Predicție Producție — log-transform + pe_dunare:</b> Logaritmarea targetului comprimează scala (log(5200)≈8.56 vs log(1400)≈7.24), eliminând dezavantajul modelelor non-liniare față de outlierul Porțile de Fier I. Variabila binară <b>pe_dunare</b> capturează regimul hidrologic special al Dunării (acorduri internaționale, lac de acumulare cu capacitate unică) fără să fragmenteze samplu-ul. Metrici raportate în GWh originali după back-transform (expm1) pentru comparabilitate directă.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="insight-box">🤖 <b>ML Predicție Producție:</b> Patru modele comparate pe n=30 cu LOO CV. <b>Linear Regression</b> (target original) servește ca baseline pur. <b>Ridge</b> (α=10, log target) adaugă regularizare L2 care previne extrapolarea haotică pe Porțile de Fier I. <b>RF și XGBoost</b> (log target, back-transform expm1) captează relații non-liniare — log-transformul comprimează distanța outlierului de la 3800 GWh diferență la ~1.3 în spațiul log. Variabila <b>pe_dunare</b> separă regimul Dunării (acorduri internaționale, lacuri de acumulare uriașe) de centralele de munte.</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. SEGMENTE OPERATIONALE ← FUNCTIA 5 (grupari pandas)
