@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\alexa\\\\Documents\\\\GitHub\\\\Hidroelectrica\" -Recurse | Where-Object { $_.Extension -in @\\('.pdf', '.docx', '.doc'\\) } | Select-Object FullName)"
+    ]
+  }
+}
