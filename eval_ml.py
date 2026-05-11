@@ -26,32 +26,34 @@ df_ml["pe_dunare"] = df_ml["nume"].str.lower().str.contains(
 le = LabelEncoder()
 df_ml["tip_enc"] = le.fit_transform(df_ml["tip"])
 
-_feats_km = ["putere_mw", "productie_gwh_an", "an_punere_functiune", "factor_utilizare"]
+# Clustering fara target (productie_gwh_an) si fara variabile derivate din el
+_feats_km = ["putere_mw", "an_punere_functiune", "tip_enc"]
 _sc_km    = StandardScaler()
 _X_km     = _sc_km.fit_transform(df_ml[_feats_km])
 _km4      = KMeans(n_clusters=4, random_state=42, n_init=10)
 df_ml["cluster"] = _km4.fit_predict(_X_km)
 
-FEAT_NAMES  = ["putere_mw", "an_punere_functiune", "factor_utilizare",
-               "productie_per_mw", "pe_dunare", "tip_enc", "cluster"]
-FEAT_LABELS = ["Putere MW", "An PIF", "Factor utilizare",
-               "Productie/MW", "Pe Dunare", "Tip centrala", "Cluster K-Means"]
+# Features fara data leakage: excluse factor_utilizare si productie_per_mw
+FEAT_NAMES  = ["putere_mw", "an_punere_functiune", "pe_dunare", "tip_enc", "cluster"]
+FEAT_LABELS = ["Putere MW", "An PIF", "Pe Dunare", "Tip centrala", "Cluster K-Means"]
 
 X_ml     = df_ml[FEAT_NAMES].values
 y_ml     = df_ml["productie_gwh_an"].values
 y_ml_log = np.log1p(y_ml)
 
-sc      = StandardScaler()
-X_ml_sc = sc.fit_transform(X_ml)
-
 loo = LeaveOneOut()
 
-def _loo_eval(model, X, y_train, y_orig, log_target=False):
+def _loo_eval(model, X_raw, y_train, y_orig, log_target=False):
+    """LOO CV cu StandardScaler re-fit per fold (previne leakage de scalare)."""
     y_pred_raw = np.zeros(len(y_train))
-    for tr, te in loo.split(X):
-        model.fit(X[tr], y_train[tr])
-        y_pred_raw[te] = model.predict(X[te])
-    model.fit(X, y_train)
+    for tr, te in loo.split(X_raw):
+        sc_fold = StandardScaler()
+        X_tr = sc_fold.fit_transform(X_raw[tr])
+        X_te = sc_fold.transform(X_raw[te])
+        model.fit(X_tr, y_train[tr])
+        y_pred_raw[te] = model.predict(X_te)
+    sc_full = StandardScaler()
+    model.fit(sc_full.fit_transform(X_raw), y_train)
     y_pred = np.expm1(y_pred_raw) if log_target else y_pred_raw
     mae  = mean_absolute_error(y_orig, y_pred)
     rmse = mean_squared_error(y_orig, y_pred) ** 0.5
@@ -62,9 +64,9 @@ lr_model    = LinearRegression()
 ridge_model = Ridge(alpha=10.0)
 rf_model    = RandomForestRegressor(n_estimators=300, random_state=42, max_features="sqrt")
 
-y_lr,    mae_lr,    rmse_lr,    r2_lr    = _loo_eval(lr_model,    X_ml_sc, y_ml,     y_ml, log_target=False)
-y_ridge, mae_ridge, rmse_ridge, r2_ridge = _loo_eval(ridge_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
-y_rf,    mae_rf,    rmse_rf,    r2_rf    = _loo_eval(rf_model,    X_ml_sc, y_ml_log, y_ml, log_target=True)
+y_lr,    mae_lr,    rmse_lr,    r2_lr    = _loo_eval(lr_model,    X_ml, y_ml,     y_ml, log_target=False)
+y_ridge, mae_ridge, rmse_ridge, r2_ridge = _loo_eval(ridge_model, X_ml, y_ml_log, y_ml, log_target=True)
+y_rf,    mae_rf,    rmse_rf,    r2_rf    = _loo_eval(rf_model,    X_ml, y_ml_log, y_ml, log_target=True)
 
 models = {
     "Linear Regression":  (y_lr,    mae_lr,    rmse_lr,    r2_lr),
@@ -75,7 +77,7 @@ models = {
 if _XGB_OK:
     xgb_model = XGBRegressor(n_estimators=200, max_depth=3, learning_rate=0.1,
                               random_state=42, verbosity=0)
-    y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
+    y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml, y_ml_log, y_ml, log_target=True)
     models["XGBoost"] = (y_xgb, mae_xgb, rmse_xgb, r2_xgb)
 
 print(f"{'Model':<25} {'R2 LOO':>8} {'MAE GWh':>10} {'RMSE GWh':>10}")

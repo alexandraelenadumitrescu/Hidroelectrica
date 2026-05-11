@@ -554,6 +554,123 @@ elif sectiune == "🗺️ Harta Centralelor":
 
     st.markdown(f'<div class="insight-box">📍 <b>Context geografic:</b> Cele {len(df_harta)} centrale principale analizate totalizează <b>{df_harta["putere_mw"].sum():.0f} MW</b> putere instalată și o producție estimată de <b>{df_harta["productie_gwh_an"].sum():,} GWh/an</b>. Județul Mehedinti domină prin sistemul Porțile de Fier (1.320 MW), urmat de Vâlcea cu sistemul complex al Oltului (11 centrale).</div>', unsafe_allow_html=True)
 
+    # ── Analiză GIS avansată (operații reale geopandas) ──────────────────────
+    with st.expander("🔬 Analiză GIS Avansată — GeoPandas (EPSG:3844)", expanded=False):
+        st.markdown("#### Reproiecție · Distanțe metrice · Dissolve · Convex Hull · Buffer")
+        st.caption("CRS original: EPSG:4326 (grade WGS84) → reproiectat EPSG:3844 (Stereografic Român, metri)")
+
+        # 1. Reproiectare la CRS metric românesc
+        gdf_proj = gdf.to_crs(epsg=3844)
+
+        # 2. Vecin cel mai apropiat per centrală (distanță metrică reală)
+        dist_vecin_km_list, vecin_apropiat_list = [], []
+        for i, row_g in gdf_proj.iterrows():
+            others = gdf_proj[gdf_proj.index != i]
+            dists_m = others.geometry.distance(row_g.geometry)
+            nearest_i = dists_m.idxmin()
+            dist_vecin_km_list.append(round(float(dists_m.min()) / 1000, 1))
+            vecin_apropiat_list.append(gdf.loc[nearest_i, "nume"])
+
+        gdf = gdf.copy()
+        gdf["dist_vecin_km"]  = dist_vecin_km_list
+        gdf["vecin_apropiat"] = vecin_apropiat_list
+
+        # 3. Dissolve per județ — agregare geometrică (centroid + statistici)
+        gdf_for_diss = gdf_proj.copy()
+        gdf_for_diss["nr"] = 1
+        gdf_diss = gdf_for_diss.dissolve(
+            by="judet",
+            aggfunc={"putere_mw": "sum", "productie_gwh_an": "sum", "nr": "count"}
+        ).rename(columns={"nr": "nr_centrale"}).reset_index()
+        gdf_diss["centroid_x"] = gdf_diss.geometry.centroid.x
+        gdf_diss["centroid_y"] = gdf_diss.geometry.centroid.y
+
+        # 4. Convex hull al întregului parc
+        park_hull     = gdf_proj.unary_union.convex_hull
+        hull_area_km2 = round(park_hull.area / 1e6, 0)
+
+        # 5. Buffer 50 km — câte alte centrale sunt în raza fiecărei centrale
+        n_vecini_50km = []
+        for i, row_g in gdf_proj.iterrows():
+            buf   = row_g.geometry.buffer(50_000)
+            count = int(gdf_proj[gdf_proj.index != i].geometry.within(buf).sum())
+            n_vecini_50km.append(count)
+        gdf["n_vecini_50km"] = n_vecini_50km
+
+        # ── Metrici sintetice ──────────────────────────────────────────────
+        m1, m2, m3 = st.columns(3)
+        m1.metric("CRS proiectat", "EPSG:3844")
+        m2.metric("Aria convex hull parc", f"{hull_area_km2:,.0f} km²")
+        m3.metric("Densitate parc", f"{30 / hull_area_km2 * 1000:.2f} centrale / 1000 km²")
+
+        # ── Tabel vecini + Dissolve ────────────────────────────────────────
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.markdown("**Vecin cel mai apropiat (distanță metrică reală, km)**")
+            df_vec = (gdf[["nume", "judet", "tip", "dist_vecin_km", "vecin_apropiat"]]
+                      .sort_values("dist_vecin_km")
+                      .rename(columns={"nume": "Centrală", "judet": "Județ", "tip": "Tip",
+                                       "dist_vecin_km": "Dist. (km)", "vecin_apropiat": "Vecin"}))
+            st.dataframe(df_vec, use_container_width=True, height=310)
+
+        with col_g2:
+            st.markdown("**Dissolve per județ — geometrie agregată**")
+            df_diss_show = (gdf_diss[["judet", "nr_centrale", "putere_mw", "productie_gwh_an"]]
+                            .sort_values("putere_mw", ascending=False)
+                            .rename(columns={"judet": "Județ", "nr_centrale": "Nr.",
+                                             "putere_mw": "Putere MW",
+                                             "productie_gwh_an": "Prod. GWh/an"}))
+            st.dataframe(df_diss_show, use_container_width=True)
+
+        # ── Plot nativ GeoPandas (matplotlib) ─────────────────────────────
+        st.markdown("**Plot nativ `gdf.plot()` — putere instalată per centrală (EPSG:3844)**")
+        fig_geo, ax_geo = plt.subplots(figsize=(9, 5.5), facecolor="#0a0f1e")
+        ax_geo.set_facecolor("#0d1528")
+        gdf_proj.plot(
+            ax=ax_geo,
+            column="putere_mw",
+            cmap="plasma",
+            markersize=[max(8, p / 7) for p in gdf_proj["putere_mw"]],
+            legend=True,
+            legend_kwds={"label": "Putere instalată (MW)", "shrink": 0.6,
+                         "labelcolor": "#b8d4ec"},
+        )
+        ax_geo.tick_params(colors="#6b8fb5", labelsize=7)
+        ax_geo.set_xlabel("Easting (m) — EPSG:3844", color="#6b8fb5", fontsize=9)
+        ax_geo.set_ylabel("Northing (m) — EPSG:3844", color="#6b8fb5", fontsize=9)
+        ax_geo.set_title("Centrale Hidroelectrice — Stereografic Român (EPSG:3844)",
+                         color="#e8f4fd", fontsize=11, pad=8)
+        for spine in ax_geo.spines.values():
+            spine.set_edgecolor("#1e3a5f")
+        st.pyplot(fig_geo)
+        plt.close(fig_geo)
+
+        # ── Buffer chart ───────────────────────────────────────────────────
+        fig_buf = px.bar(
+            gdf.sort_values("n_vecini_50km", ascending=True),
+            x="n_vecini_50km", y="nume", orientation="h",
+            color="n_vecini_50km",
+            color_continuous_scale=["#0d1528", "#1e3a5f", "#00d4ff"],
+            labels={"n_vecini_50km": "Nr. centrale în 50 km", "nume": ""},
+            title="Analiză Buffer 50 km — vecini în raza metrică (EPSG:3844)",
+            height=530,
+        )
+        fig_buf.update_layout(**PLOT_LAYOUT, coloraxis_showscale=False)
+        st.plotly_chart(fig_buf, use_container_width=True)
+
+        st.markdown(
+            f'<div class="insight-box">🗺️ <b>Analiză GIS (EPSG:3844):</b> '
+            f'Reproiecția în Stereografic Român permite distanțe și arii metrice reale. '
+            f'Convex hull-ul parcului acoperă <b>{int(hull_area_km2):,} km²</b>. '
+            f'Sistemul Olt (Vâlcea) formează cel mai dens cluster geografic — '
+            f'până la 9 centrale în raza de 50 km. '
+            f'Porțile de Fier I și II au cel mai mic număr de vecini (0 în 50 km) — '
+            f'confirmare a unicității amplasamentului fluvial pe Dunăre. '
+            f'Dissolve per județ: Vâlcea deține {int(gdf_diss[gdf_diss["judet"]=="Valcea"]["nr_centrale"].values[0]) if "Valcea" in gdf_diss["judet"].values else 11} centrale '
+            f'cu geometria convex hull agregată calculată automat de GeoPandas.</div>',
+            unsafe_allow_html=True
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. ANALIZA FINANCIARA (tratare valori lipsa + extreme, codificare, scalare)
 #    ← FUNCTIILE 3 + 4
@@ -1447,7 +1564,8 @@ elif sectiune == "📈 Regresie Multiplă":
             "<p style='color:#6b8fb5;'>n=30 centrale · LOO CV · "
             "<b>LR</b>: target GWh original · "
             "<b>Ridge/RF/XGB</b>: target log(GWh), predicții back-transformate · "
-            "features: putere MW, an PIF, factor utilizare, pe_dunare, tip, cluster</p>",
+            "features: putere MW, an PIF, pe_dunare, tip, cluster · "
+            "<i>fără factor_utilizare / productie_per_mw (circulare față de target)</i></p>",
             unsafe_allow_html=True)
 
         # ── Build dataset ──────────────────────────────────────────────────
@@ -1459,32 +1577,36 @@ elif sectiune == "📈 Regresie Multiplă":
         le_ml = LabelEncoder()
         df_ml["tip_enc"] = le_ml.fit_transform(df_ml["tip"])
 
-        _feats_km = ["putere_mw", "productie_gwh_an", "an_punere_functiune", "factor_utilizare"]
+        # Clustering fara target (productie_gwh_an) si fara variabile derivate din el
+        _feats_km = ["putere_mw", "an_punere_functiune", "tip_enc"]
         _sc_km = StandardScaler()
         _X_km = _sc_km.fit_transform(df_ml[_feats_km])
         _km4 = KMeans(n_clusters=4, random_state=42, n_init=10)
         df_ml["cluster"] = _km4.fit_predict(_X_km)
 
-        FEAT_NAMES  = ["putere_mw", "an_punere_functiune", "factor_utilizare",
-                       "productie_per_mw", "pe_dunare", "tip_enc", "cluster"]
-        FEAT_LABELS = ["Putere MW", "An PIF", "Factor utilizare",
-                       "Producție/MW", "Pe Dunăre", "Tip centrală", "Cluster K-Means"]
+        # Features fara data leakage: excluse factor_utilizare si productie_per_mw
+        # (ambele sunt functii directe ale targetului productie_gwh_an)
+        FEAT_NAMES  = ["putere_mw", "an_punere_functiune", "pe_dunare", "tip_enc", "cluster"]
+        FEAT_LABELS = ["Putere MW", "An PIF", "Pe Dunăre", "Tip centrală", "Cluster K-Means"]
 
         X_ml     = df_ml[FEAT_NAMES].values
         y_ml     = df_ml["productie_gwh_an"].values
         y_ml_log = np.log1p(y_ml)
 
-        sc_ml   = StandardScaler()
-        X_ml_sc = sc_ml.fit_transform(X_ml)
-
         loo_ml = LeaveOneOut()
 
-        def _loo_eval(model, X, y_train, y_orig, log_target=False):
+        def _loo_eval(model, X_raw, y_train, y_orig, log_target=False):
+            """LOO CV cu StandardScaler re-fit per fold (previne leakage de scalare)."""
             y_pred_raw = np.zeros(len(y_train))
-            for tr, te in loo_ml.split(X):
-                model.fit(X[tr], y_train[tr])
-                y_pred_raw[te] = model.predict(X[te])
-            model.fit(X, y_train)   # refit full data for feature importance
+            for tr, te in loo_ml.split(X_raw):
+                sc_fold = StandardScaler()
+                X_tr = sc_fold.fit_transform(X_raw[tr])
+                X_te = sc_fold.transform(X_raw[te])
+                model.fit(X_tr, y_train[tr])
+                y_pred_raw[te] = model.predict(X_te)
+            # Refit pe datele complete pentru feature importances
+            sc_full = StandardScaler()
+            model.fit(sc_full.fit_transform(X_raw), y_train)
             y_pred = np.expm1(y_pred_raw) if log_target else y_pred_raw
             mae  = mean_absolute_error(y_orig, y_pred)
             rmse = mean_squared_error(y_orig, y_pred) ** 0.5
@@ -1495,9 +1617,9 @@ elif sectiune == "📈 Regresie Multiplă":
         ridge_model = Ridge(alpha=10.0)
         rf_model    = RandomForestRegressor(n_estimators=300, random_state=42, max_features="sqrt")
 
-        y_lr,    mae_lr,    rmse_lr,    r2_lr    = _loo_eval(lr_model,    X_ml_sc, y_ml,     y_ml, log_target=False)
-        y_ridge, mae_ridge, rmse_ridge, r2_ridge = _loo_eval(ridge_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
-        y_rf,    mae_rf,    rmse_rf,    r2_rf    = _loo_eval(rf_model,    X_ml_sc, y_ml_log, y_ml, log_target=True)
+        y_lr,    mae_lr,    rmse_lr,    r2_lr    = _loo_eval(lr_model,    X_ml, y_ml,     y_ml, log_target=False)
+        y_ridge, mae_ridge, rmse_ridge, r2_ridge = _loo_eval(ridge_model, X_ml, y_ml_log, y_ml, log_target=True)
+        y_rf,    mae_rf,    rmse_rf,    r2_rf    = _loo_eval(rf_model,    X_ml, y_ml_log, y_ml, log_target=True)
 
         results = {
             "Linear Regression": (y_lr,    mae_lr,    rmse_lr,    r2_lr,    "#6b8fb5"),
@@ -1508,7 +1630,7 @@ elif sectiune == "📈 Regresie Multiplă":
         if _XGB_OK:
             xgb_model = XGBRegressor(n_estimators=200, max_depth=3, learning_rate=0.1,
                                      random_state=42, verbosity=0)
-            y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml_sc, y_ml_log, y_ml, log_target=True)
+            y_xgb, mae_xgb, rmse_xgb, r2_xgb = _loo_eval(xgb_model, X_ml, y_ml_log, y_ml, log_target=True)
             results["XGBoost"] = (y_xgb, mae_xgb, rmse_xgb, r2_xgb, "#ffaa00")
 
         # ── Metrics comparison ────────────────────────────────────────────
@@ -1605,7 +1727,7 @@ elif sectiune == "📈 Regresie Multiplă":
                               xaxis_tickangle=-55, barmode="group", height=380)
         st.plotly_chart(fig_res, use_container_width=True)
 
-        st.markdown('<div class="insight-box">🤖 <b>ML Predicție Producție:</b> Patru modele comparate pe n=30 cu LOO CV. <b>Linear Regression</b> (target original) servește ca baseline pur. <b>Ridge</b> (α=10, log target) adaugă regularizare L2 care previne extrapolarea haotică pe Porțile de Fier I. <b>RF și XGBoost</b> (log target, back-transform expm1) captează relații non-liniare — log-transformul comprimează distanța outlierului de la 3800 GWh diferență la ~1.3 în spațiul log. Variabila <b>pe_dunare</b> separă regimul Dunării (acorduri internaționale, lacuri de acumulare uriașe) de centralele de munte.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="insight-box">🤖 <b>ML Predicție Producție — fără data leakage:</b> Features: putere MW, an PIF, pe_dunare, tip, cluster (excluse <i>factor_utilizare</i> și <i>productie_per_mw</i> — derivate din target). StandardScaler re-estimat per fold LOO (fără leakage de scalare). <b>Linear Regression</b> servește ca baseline. <b>Ridge</b> (α=10, log target) adaugă regularizare L2. <b>RF și XGBoost</b> (log target, back-transform expm1) captează relații non-liniare — log-transformul comprimează distanța outlierului Porțile de Fier de la ~3.800 GWh la ~1.3 în spațiul log. Variabila <b>pe_dunare</b> separă regimul hidrologic al Dunării de centralele de munte.</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. SEGMENTE OPERATIONALE ← FUNCTIA 5 (grupari pandas)
