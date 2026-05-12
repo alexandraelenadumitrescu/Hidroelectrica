@@ -7,10 +7,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import geopandas as gpd
-from shapely.geometry import Point
+from shapely.geometry import Point, LineString
 import statsmodels.api as sm
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, DBSCAN
 from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, LeaveOneOut, cross_val_score
@@ -21,21 +21,14 @@ from sklearn.decomposition import PCA
 from scipy.cluster.hierarchy import linkage, cophenet
 from scipy.spatial.distance import pdist
 import plotly.figure_factory as ff
-import pathlib
 import warnings
 warnings.filterwarnings("ignore")
 
-try:
-    import yfinance as yf
-    _YFINANCE_OK = True
-except ImportError:
-    _YFINANCE_OK = False
-
-try:
-    from xgboost import XGBRegressor
-    _XGB_OK = True
-except ImportError:
-    _XGB_OK = False
+from config import CSS_STYLE, PLOT_LAYOUT, COLORS, _DANUBE_WGS84
+from data_loader import (load_data, load_stock_data, load_meteo_data,
+                          load_sen_daily, _get_central_ml_models,
+                          _YFINANCE_OK, _XGB_OK, XGBRegressor,
+                          _SEN_CACHE_DIR, _load_month)
 
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
@@ -47,237 +40,11 @@ st.set_page_config(
 )
 
 # ── STILIZARE ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+st.markdown(CSS_STYLE, unsafe_allow_html=True)
 
-html, body, [class*="css"] {
-    font-family: 'Syne', sans-serif;
-}
-.main { background-color: #0a0f1e; }
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0d1528 0%, #0a1020 100%);
-    border-right: 1px solid #1e3a5f;
-}
-.metric-card {
-    background: linear-gradient(135deg, #0d1f3c 0%, #0a1628 100%);
-    border: 1px solid #1e3a5f;
-    border-radius: 12px;
-    padding: 20px 24px;
-    margin-bottom: 12px;
-}
-.metric-value {
-    font-size: 2rem;
-    font-weight: 800;
-    color: #00d4ff;
-    font-family: 'JetBrains Mono', monospace;
-}
-.metric-label {
-    font-size: 0.78rem;
-    color: #6b8fb5;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin-top: 4px;
-}
-.metric-delta-pos { color: #00e676; font-size: 0.85rem; }
-.metric-delta-neg { color: #ff5252; font-size: 0.85rem; }
-.section-header {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: #e8f4fd;
-    border-left: 4px solid #00d4ff;
-    padding-left: 14px;
-    margin: 28px 0 18px 0;
-}
-.insight-box {
-    background: linear-gradient(135deg, #0d2340 0%, #091828 100%);
-    border: 1px solid #1e5080;
-    border-left: 4px solid #00d4ff;
-    border-radius: 8px;
-    padding: 14px 18px;
-    margin: 10px 0;
-    font-size: 0.9rem;
-    color: #b8d4ec;
-    line-height: 1.6;
-}
-.warning-box {
-    border-left-color: #ffaa00;
-    border-color: #503000;
-    background: linear-gradient(135deg, #1a0f00 0%, #120a00 100%);
-    color: #e8c870;
-}
-h1, h2, h3 { color: #e8f4fd !important; }
-.stTabs [data-baseweb="tab"] {
-    color: #6b8fb5;
-    font-family: 'Syne', sans-serif;
-    font-weight: 600;
-}
-.stTabs [aria-selected="true"] {
-    color: #00d4ff !important;
-    border-bottom-color: #00d4ff !important;
-}
-div[data-testid="metric-container"] {
-    background: #0d1f3c;
-    border: 1px solid #1e3a5f;
-    border-radius: 10px;
-    padding: 14px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ── PLOTLY TEMPLATE ──────────────────────────────────────────────────────────
-PLOT_LAYOUT = dict(
-    paper_bgcolor="#0a0f1e",
-    plot_bgcolor="#0d1528",
-    font=dict(family="Syne, sans-serif", color="#b8d4ec"),
-    title_font=dict(color="#e8f4fd", size=16, family="Syne, sans-serif"),
-    xaxis=dict(gridcolor="#1a2e4a", linecolor="#1e3a5f", tickfont=dict(color="#6b8fb5")),
-    yaxis=dict(gridcolor="#1a2e4a", linecolor="#1e3a5f", tickfont=dict(color="#6b8fb5")),
-    legend=dict(bgcolor="#0d1528", bordercolor="#1e3a5f", borderwidth=1),
-    margin=dict(t=50, b=40, l=50, r=20),
-)
-COLORS = ["#00d4ff", "#ff6b35", "#00e676", "#ffaa00", "#bb86fc", "#ff5252"]
 
 # ── INCARCARE DATE ───────────────────────────────────────────────────────────
-@st.cache_data
-def load_data():
-    df_main    = pd.read_csv("date/hidroelectrica_consolidat_2021_2025.csv")
-    df_indiv   = pd.read_csv("date/hidroelectrica_individual_2023_2025.csv")
-    df_seg     = pd.read_csv("date/hidroelectrica_segmente_2023_2025.csv")
-    df_macro   = pd.read_csv("date/hidroelectrica_macro_operationale.csv")
-    df_centrale= pd.read_csv("date/hidroelectrica_centrale.csv")
-    df_complet = pd.read_csv("date/hidroelectrica_dataset_complet.csv")
-    df_cf      = pd.read_csv("date/hidroelectrica_cashflow_2024_2025.csv")
-    return df_main, df_indiv, df_seg, df_macro, df_centrale, df_complet, df_cf
-
 df_main, df_indiv, df_seg, df_macro, df_centrale, df_complet, df_cf = load_data()
-
-
-@st.cache_data(ttl=3600)
-def load_stock_data():
-    try:
-        if not _YFINANCE_OK:
-            return None, "yfinance nu este instalat. Rulați: pip install yfinance"
-        df = yf.download("H2O.RO", start="2023-07-12", progress=False)
-        if df.empty:
-            return None, "Nu s-au găsit date pentru H2O.RO pe această perioadă."
-        return df, None
-    except Exception as e:
-        return None, str(e)
-
-
-_SEN_CACHE_DIR = pathlib.Path(__file__).parent / "cache" / "sen"
-_SEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _fetch_month_xml(year: int, month: int) -> pd.DataFrame:
-    """Fetch one calendar month from the SEN XML API (~1400 rows, ~30 min resolution)."""
-    import requests
-    from xml.etree import ElementTree as ET
-    from calendar import monthrange
-    last_day = monthrange(year, month)[1]
-    url = (
-        f"https://www.sistemulenergetic.ro/statistics/stream/xml/"
-        f"{year}/{month}/1/0/0/{year}/{month}/{last_day}/23/59"
-    )
-    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    root = ET.fromstring(r.text)
-    ts_map = {v.get("xid"): v.text for v in root.find("series").findall("value")}
-    series_data = {}
-    for graph in root.find("graphs").findall("graph"):
-        title = graph.get("title")
-        series_data[title] = {v.get("xid"): v.text for v in graph.findall("value")}
-    common = set(ts_map.keys())
-    for vals in series_data.values():
-        common &= set(vals.keys())
-    common = sorted(common, key=int)
-    return pd.DataFrame([
-        {"Data": ts_map[x], **{t: vals[x] for t, vals in series_data.items()}}
-        for x in common
-    ])
-
-
-def _load_month(year: int, month: int, is_current: bool) -> pd.DataFrame:
-    """Return month data: from parquet cache if available (and not current month), else fetch."""
-    path = _SEN_CACHE_DIR / f"sen_{year}_{month:02d}.parquet"
-    if not is_current and path.exists():
-        return pd.read_parquet(path)
-    df = _fetch_month_xml(year, month)
-    if not is_current and not df.empty:
-        df_save = df.copy()
-        df_save["Data"] = pd.to_datetime(df_save["Data"], errors="coerce")
-        for col in df_save.columns[1:]:
-            df_save[col] = pd.to_numeric(df_save[col], errors="coerce")
-        df_save.to_parquet(path, index=False)
-    return df
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_meteo_data() -> pd.DataFrame:
-    """Fetch daily meteo from Open-Meteo Archive API for Râmnicu Vâlcea (2016-01-01 to today)."""
-    import requests
-    from datetime import date
-    end_date = date.today().isoformat()
-    params = {
-        "latitude": 45.1,
-        "longitude": 24.37,
-        "start_date": "2016-01-01",
-        "end_date": end_date,
-        "daily": ",".join([
-            "precipitation_sum", "temperature_2m_mean", "snowfall_sum",
-            "snow_depth_max", "et0_fao_evapotranspiration", "soil_moisture_0_to_7cm_mean",
-        ]),
-        "timezone": "Europe/Bucharest",
-    }
-    r = requests.get("https://archive-api.open-meteo.com/v1/archive", params=params, timeout=30)
-    r.raise_for_status()
-    data = r.json()["daily"]
-    df = pd.DataFrame(data)
-    df["time"] = pd.to_datetime(df["time"])
-    df = df.rename(columns={"time": "date"})
-    df["soil_moisture_0_to_7cm_mean"] = df["soil_moisture_0_to_7cm_mean"].fillna(
-        df["soil_moisture_0_to_7cm_mean"].median()
-    )
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_sen_daily() -> pd.DataFrame:
-    """Aggregate 30-min SEN cache to daily mean Hidro MW and share of total."""
-    files = sorted(_SEN_CACHE_DIR.glob("sen_*.parquet"))
-    if not files:
-        return pd.DataFrame()
-    chunks = []
-    for f in files:
-        try:
-            chunks.append(pd.read_parquet(f))
-        except Exception:
-            pass
-    if not chunks:
-        return pd.DataFrame()
-    df = pd.concat(chunks, ignore_index=True)
-    df.columns = df.columns.str.strip()
-    date_col = df.columns[0]
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df.dropna(subset=[date_col])
-    hidro_col = next((c for c in df.columns if "hidro" in c.lower()), None)
-    total_col = next((c for c in df.columns if "debitat" in c.lower() or "cerut" in c.lower()), None)
-    if hidro_col is None:
-        return pd.DataFrame()
-    df[hidro_col] = pd.to_numeric(df[hidro_col], errors="coerce")
-    df["_date"] = df[date_col].dt.normalize()
-    agg = df.groupby("_date")[hidro_col].mean().reset_index()
-    agg.columns = ["date", "hidro_mw"]
-    if total_col:
-        df[total_col] = pd.to_numeric(df[total_col], errors="coerce")
-        tot = df.groupby("_date")[total_col].mean().reset_index()
-        tot.columns = ["date", "total_mw"]
-        agg = agg.merge(tot, on="date", how="left")
-        agg["hidro_pct"] = (agg["hidro_mw"] / agg["total_mw"].replace(0, np.nan)) * 100
-    else:
-        agg["hidro_pct"] = np.nan
-    return agg
 
 
 # ── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -291,7 +58,8 @@ with st.sidebar:
         ["🏠 Overview", "⚡ Mix Energetic Live", "🗺️ Harta Centralelor",
          "📊 Analiză Financiară", "🔀 Segmente Operaționale",
          "🔵 Clustering Centrale", "🌊 Tipologie Hidrologică",
-         "🎯 Clasificare", "📈 Regresie Multiplă", "💡 Potențial Extindere"],
+         "🎯 Clasificare", "📈 Regresie Multiplă", "💡 Potențial Extindere",
+         "🖥️ Simulator Decizional"],
         label_visibility="collapsed"
     )
     st.markdown("---")
@@ -401,9 +169,10 @@ if sectiune == "🏠 Overview":
         if isinstance(df_stock.columns, pd.MultiIndex):
             df_stock.columns = [col[0] for col in df_stock.columns]
 
-        if not df_stock.empty and "Close" in df_stock.columns:
-            current_price = float(df_stock["Close"].iloc[-1])
-            prev_price = float(df_stock["Close"].iloc[-2]) if len(df_stock) > 1 else current_price
+        close_s = df_stock["Close"].dropna() if "Close" in df_stock.columns else pd.Series(dtype=float)
+        if not df_stock.empty and len(close_s) > 0:
+            current_price = float(close_s.iloc[-1])
+            prev_price = float(close_s.iloc[-2]) if len(close_s) > 1 else current_price
             daily_change = (current_price / prev_price - 1) * 100
 
             try:
@@ -422,7 +191,7 @@ if sectiune == "🏠 Overview":
 
             fig_stock = go.Figure()
             fig_stock.add_trace(go.Scatter(
-                x=df_stock.index, y=df_stock["Close"],
+                x=close_s.index, y=close_s,
                 name="Preț închidere", mode="lines",
                 line=dict(color="#00d4ff", width=2),
                 fill="tozeroy", fillcolor="rgba(0,212,255,0.08)",
@@ -632,8 +401,7 @@ elif sectiune == "🗺️ Harta Centralelor":
             cmap="plasma",
             markersize=[max(8, p / 7) for p in gdf_proj["putere_mw"]],
             legend=True,
-            legend_kwds={"label": "Putere instalată (MW)", "shrink": 0.6,
-                         "labelcolor": "#b8d4ec"},
+            legend_kwds={"label": "Putere instalată (MW)", "shrink": 0.6},
         )
         ax_geo.tick_params(colors="#6b8fb5", labelsize=7)
         ax_geo.set_xlabel("Easting (m) — EPSG:3844", color="#6b8fb5", fontsize=9)
@@ -671,6 +439,185 @@ elif sectiune == "🗺️ Harta Centralelor":
             unsafe_allow_html=True
         )
 
+    # ── Analiză GIS Analitică ─────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="section-header">🔬 Analiză GIS Analitică</div>', unsafe_allow_html=True)
+    tab_bazine, tab_dbscan, tab_heatmap = st.tabs([
+        "🌊 Bazine Hidrologice", "📍 Clustering Spațial DBSCAN", "🔥 Heatmap Producție"
+    ])
+
+    with tab_bazine:
+        BASIN_MAP = {
+            "dunare": "Bazin Dunăre",
+            "olt": "Bazin Olt", "lotru": "Bazin Olt", "sadu": "Bazin Olt",
+            "arges": "Bazin Argeș", "dambovita": "Bazin Argeș",
+            "bistrita": "Bazin Siret", "siret": "Bazin Siret",
+            "mures": "Bazin Mureș", "somes": "Bazin Someș",
+            "cris": "Bazin Crișuri", "jiu": "Bazin Jiu",
+        }
+        def _assign_basin(rau):
+            if not isinstance(rau, str):
+                return "Altele"
+            rau_l = rau.lower()
+            for key, basin in BASIN_MAP.items():
+                if key in rau_l:
+                    return basin
+            return "Altele"
+
+        df_b = df_centrale.copy()
+        df_b["bazin"] = df_b["rau"].apply(_assign_basin)
+
+        _dan_gdf = gpd.GeoDataFrame(
+            geometry=[LineString(_DANUBE_WGS84)], crs="EPSG:4326"
+        ).to_crs(epsg=3844)
+        _dan_line = _dan_gdf.geometry.iloc[0]
+        _gdf_b = gpd.GeoDataFrame(
+            df_b,
+            geometry=[Point(lo, la) for lo, la in zip(df_b["lon"], df_b["lat"])],
+            crs="EPSG:4326"
+        ).to_crs(epsg=3844)
+        df_b["dist_dunare_km"] = _gdf_b.geometry.distance(_dan_line) / 1000
+
+        basin_agg = df_b.groupby("bazin").agg(
+            nr_centrale=("nume", "count"),
+            putere_mw=("putere_mw", "sum"),
+            productie_gwh=("productie_gwh_an", "sum"),
+            dist_dunare_km_med=("dist_dunare_km", "mean"),
+        ).reset_index().sort_values("productie_gwh", ascending=False)
+
+        cb1, cb2 = st.columns(2)
+        with cb1:
+            fig_baz = px.bar(
+                basin_agg, x="bazin", y="productie_gwh",
+                color="bazin", text="nr_centrale",
+                labels={"bazin": "", "productie_gwh": "Producție (GWh/an)", "nr_centrale": "Nr. centrale"},
+                title="Producție per Bazin Hidrologic",
+                color_discrete_sequence=COLORS,
+            )
+            fig_baz.update_layout(**PLOT_LAYOUT)
+            st.plotly_chart(fig_baz, use_container_width=True)
+        with cb2:
+            fig_tree = px.treemap(
+                basin_agg, path=["bazin"], values="productie_gwh",
+                color="putere_mw",
+                color_continuous_scale=["#0d1528", "#1e3a5f", "#00d4ff"],
+                title="Contribuție producție per bazin (GWh/an)",
+                labels={"putere_mw": "Putere MW"},
+            )
+            fig_tree.update_layout(paper_bgcolor="#0a0f1e", font=dict(color="#b8d4ec"),
+                                    title_font=dict(color="#e8f4fd"))
+            st.plotly_chart(fig_tree, use_container_width=True)
+
+        st.dataframe(
+            basin_agg.rename(columns={
+                "bazin": "Bazin", "nr_centrale": "Nr. Centrale",
+                "putere_mw": "Putere MW", "productie_gwh": "Producție GWh/an",
+                "dist_dunare_km_med": "Dist. medie Dunăre (km)"
+            }).round(1),
+            use_container_width=True, hide_index=True
+        )
+        _olt_gwh = int(basin_agg[basin_agg["bazin"] == "Bazin Olt"]["productie_gwh"].sum()) if "Bazin Olt" in basin_agg["bazin"].values else 0
+        st.markdown(
+            f'<div class="insight-box">🌊 <b>Bazine hidrologice:</b> '
+            f'Bazinul Olt domină cu <b>{_olt_gwh:,} GWh/an</b> din sistemul de acumulare '
+            f'(Ciunget, Vidraru, Bicaz). Bazinul Dunăre contribuie cu Porțile de Fier I+II — '
+            f'debit reglementat internațional, independent de precipitațiile locale. '
+            f'Distanța față de Dunăre este calculată metric în EPSG:3844 (Stereografic Român).</div>',
+            unsafe_allow_html=True
+        )
+
+    with tab_dbscan:
+        eps_km_db = st.slider("Raza cluster (eps, km)", min_value=20, max_value=100, value=50, step=5, key="eps_dbscan")
+        min_s_db  = st.slider("Min. centrale per cluster (min_samples)", min_value=2, max_value=4, value=2, key="min_s_dbscan")
+        _gdf_db = gpd.GeoDataFrame(
+            df_centrale.copy(),
+            geometry=[Point(lo, la) for lo, la in zip(df_centrale["lon"], df_centrale["lat"])],
+            crs="EPSG:4326"
+        ).to_crs(epsg=3844)
+        _coords_db = np.column_stack([_gdf_db.geometry.x, _gdf_db.geometry.y])
+        _db = DBSCAN(eps=eps_km_db * 1000, min_samples=min_s_db).fit(_coords_db)
+        df_db = df_centrale.copy()
+        df_db["cluster_spatial"] = _db.labels_
+        df_db["cluster_label"] = df_db["cluster_spatial"].apply(
+            lambda c: f"Cluster {c}" if c >= 0 else "Outlier geografic"
+        )
+        n_db_clusters = len(set(_db.labels_)) - (1 if -1 in _db.labels_ else 0)
+        n_db_outliers  = int((_db.labels_ == -1).sum())
+
+        cd1, cd2, cd3 = st.columns(3)
+        cd1.metric("Clustere identificate", n_db_clusters)
+        cd2.metric("Outlieri geografici", n_db_outliers)
+        cd3.metric("Eps utilizat", f"{eps_km_db} km")
+
+        fig_db = px.scatter_mapbox(
+            df_db, lat="lat", lon="lon",
+            color="cluster_label",
+            hover_name="nume",
+            hover_data={"putere_mw": True, "cluster_spatial": False, "lat": False, "lon": False},
+            size="putere_mw", size_max=30,
+            zoom=5.8, center={"lat": 45.5, "lon": 24.5},
+            mapbox_style="carto-darkmatter",
+            title=f"DBSCAN eps={eps_km_db} km — {n_db_clusters} clustere spațiale",
+            color_discrete_sequence=COLORS,
+        )
+        fig_db.update_layout(
+            paper_bgcolor="#0a0f1e", font=dict(color="#b8d4ec"),
+            legend=dict(bgcolor="#0d1528", bordercolor="#1e3a5f"),
+            margin=dict(t=40, b=10, l=0, r=0), height=480
+        )
+        st.plotly_chart(fig_db, use_container_width=True)
+        st.dataframe(
+            df_db[["nume","judet","putere_mw","productie_gwh_an","cluster_label"]]
+            .sort_values("cluster_label")
+            .rename(columns={"nume":"Centrală","judet":"Județ","putere_mw":"MW",
+                             "productie_gwh_an":"GWh/an","cluster_label":"Cluster Spațial"}),
+            use_container_width=True, hide_index=True
+        )
+        st.markdown(
+            '<div class="insight-box">📍 <b>DBSCAN spațial:</b> '
+            'Centralele din același cluster geografic sunt expuse la același risc hidrologic regional — '
+            'o secetă pe Olt afectează simultan toate centralele din cluster. '
+            'Outlieri geografici (label -1): centrale izolate fără vecini în raza eps, '
+            'cu risc hidrologic independent. Modificați eps pentru a explora granularitatea.</div>',
+            unsafe_allow_html=True
+        )
+
+    with tab_heatmap:
+        norm_opt = st.radio(
+            "Normalizare", ["Producție brută (GWh/an)", "Producție per MW instalat (eficiență)"],
+            horizontal=True, key="heatmap_norm"
+        )
+        df_hm = df_centrale.copy()
+        if norm_opt.startswith("Producție per"):
+            df_hm["z_val"] = df_hm["productie_gwh_an"] / df_hm["putere_mw"]
+            z_label = "GWh/MW instalat"
+        else:
+            df_hm["z_val"] = df_hm["productie_gwh_an"]
+            z_label = "GWh/an"
+        fig_hm = px.density_mapbox(
+            df_hm, lat="lat", lon="lon", z="z_val",
+            radius=40,
+            center={"lat": 45.5, "lon": 24.5}, zoom=5.5,
+            mapbox_style="carto-darkmatter",
+            color_continuous_scale="plasma",
+            title=f"Heatmap Producție — {z_label}",
+            labels={"z_val": z_label},
+        )
+        fig_hm.update_layout(
+            paper_bgcolor="#0a0f1e", font=dict(color="#b8d4ec"),
+            title_font=dict(color="#e8f4fd"),
+            margin=dict(t=40, b=10, l=0, r=0), height=520
+        )
+        st.plotly_chart(fig_hm, use_container_width=True)
+        st.markdown(
+            '<div class="insight-box">🔥 <b>Heatmap producție:</b> '
+            'Densitatea culorii reflectă concentrarea producției energetice — zonele calde indică '
+            'dependență geografică ridicată. Heatmap-ul pe <i>producție per MW</i> relevă eficiența '
+            'operațională, independent de puterea instalată. Sistemul Olt (Vâlcea) apare ca o bandă '
+            'continuă față de cele două puncte izolate ale Porților de Fier.</div>',
+            unsafe_allow_html=True
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. ANALIZA FINANCIARA (tratare valori lipsa + extreme, codificare, scalare)
 #    ← FUNCTIILE 3 + 4
@@ -678,7 +625,7 @@ elif sectiune == "🗺️ Harta Centralelor":
 elif sectiune == "📊 Analiză Financiară":
     st.markdown('<div class="section-header">📊 Preprocesare & Analiză Date</div>', unsafe_allow_html=True)
 
-    tabs = st.tabs(["Valori Lipsă & Extreme", "Statistici Descriptive"])
+    tabs = st.tabs(["Valori Lipsă & Extreme", "🔤 Codificare Date", "📐 Scalare", "Statistici Descriptive"])
 
     # ── TAB 1: Functia 3 - valori lipsa si extreme ──────────────────────────
     with tabs[0]:
@@ -735,8 +682,109 @@ elif sectiune == "📊 Analiză Financiară":
         st.plotly_chart(fig_box, use_container_width=True)
         st.markdown('<div class="insight-box">📊 <b>Observație:</b> Valorile extreme identificate corespund anului 2022 (preț energie excepțional de ridicat: 712 RON/MWh din cauza crizei energetice) și anului 2023 (venituri record de 12.16 mld RON). Acestea sunt valori reale, nu erori de date — reflectă contextul macroeconomic specific.</div>', unsafe_allow_html=True)
 
-    # ── TAB 2: Statistici descriptive ────────────────────────────────────────
+    # ── TAB 2: Codificare Date (PY-4) ────────────────────────────────────────
     with tabs[1]:
+        st.markdown("#### Codificare Date Categoriale — `LabelEncoder`")
+        st.markdown("<p style='color:#6b8fb5;'>Transformarea variabilelor categoriale în reprezentări numerice pentru algoritmii ML</p>", unsafe_allow_html=True)
+
+        le_demo = LabelEncoder()
+        df_enc = df_centrale[["nume", "tip", "rau", "judet"]].copy()
+        df_enc["tip_enc"]   = le_demo.fit_transform(df_enc["tip"])
+        le_rau = LabelEncoder()
+        df_enc["rau_enc"]   = le_rau.fit_transform(df_enc["rau"])
+        le_jud = LabelEncoder()
+        df_enc["judet_enc"] = le_jud.fit_transform(df_enc["judet"])
+
+        col_enc1, col_enc2 = st.columns([1, 1])
+        with col_enc1:
+            st.markdown("**Mapare tip centrală → cod numeric**")
+            tip_map = pd.DataFrame({
+                "Tip (original)": le_demo.classes_,
+                "Cod numeric":    list(range(len(le_demo.classes_))),
+            })
+            st.dataframe(tip_map, use_container_width=True, hide_index=True)
+
+            st.markdown("**Mapare județ → cod numeric**")
+            jud_map = pd.DataFrame({
+                "Județ (original)": le_jud.classes_,
+                "Cod numeric":      list(range(len(le_jud.classes_))),
+            })
+            st.dataframe(jud_map, use_container_width=True, hide_index=True)
+
+        with col_enc2:
+            st.markdown("**Tabel centrale — înainte și după codificare**")
+            st.dataframe(
+                df_enc[["nume", "tip", "tip_enc", "rau", "rau_enc", "judet", "judet_enc"]],
+                use_container_width=True, hide_index=True,
+            )
+
+        df_enc_count = df_centrale.groupby("tip").size().reset_index(name="Nr. centrale")
+        df_enc_count["Cod numeric"] = le_demo.transform(df_enc_count["tip"])
+        df_enc_count["Etichetă"] = df_enc_count["tip"] + "  →  cod " + df_enc_count["Cod numeric"].astype(str)
+        fig_enc = px.bar(
+            df_enc_count, x="Etichetă", y="Nr. centrale",
+            color="tip",
+            color_discrete_sequence=COLORS,
+            title="LabelEncoder — nr. centrale per tip (cod numeric pe bară)",
+            text="Cod numeric",
+        )
+        fig_enc.update_traces(textposition="outside", textfont_size=13)
+        fig_enc.update_layout(**PLOT_LAYOUT, showlegend=False)
+        st.plotly_chart(fig_enc, use_container_width=True)
+        st.markdown('<div class="insight-box">🔤 <b>LabelEncoder</b> alocă fiecărei categorii un întreg unic (0, 1, 2...). '
+                    'Ordinea reflectă sortarea alfabetică: <b>acumulare→0, firul_apei→1, fluvial→2</b>. '
+                    'Codificarea este folosită ca feature în KMeans, Ridge, RandomForest și XGBoost.</div>',
+                    unsafe_allow_html=True)
+
+    # ── TAB 3: Scalare (PY-5) ────────────────────────────────────────────────
+    with tabs[2]:
+        st.markdown("#### Scalare Date — `StandardScaler`")
+        st.markdown("<p style='color:#6b8fb5;'>Standardizare z = (x − μ) / σ pentru a aduce variabilele la aceeași scară</p>", unsafe_allow_html=True)
+
+        feats_sc = ["putere_mw", "productie_gwh_an", "an_punere_functiune"]
+        df_sc_raw = df_centrale[feats_sc].copy()
+        sc_demo = StandardScaler()
+        X_sc = sc_demo.fit_transform(df_sc_raw)
+        df_sc_norm = pd.DataFrame(X_sc, columns=[f"{c}_scaled" for c in feats_sc])
+
+        st.markdown("**Statistici înainte de scalare (valori originale)**")
+        st.dataframe(df_sc_raw.describe().round(2), use_container_width=True)
+
+        st.markdown("**Statistici după StandardScaler (medie≈0, std≈1)**")
+        st.dataframe(df_sc_norm.describe().round(3), use_container_width=True)
+
+        feat_viz = st.selectbox("Variabilă de vizualizat", feats_sc, key="sc_feat")
+        idx_feat = feats_sc.index(feat_viz)
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            fig_raw = px.histogram(df_sc_raw, x=feat_viz, nbins=12,
+                                   title=f"{feat_viz} — original",
+                                   color_discrete_sequence=["#ff6b35"])
+            fig_raw.update_layout(**PLOT_LAYOUT)
+            st.plotly_chart(fig_raw, use_container_width=True)
+        with col_s2:
+            fig_norm = px.histogram(df_sc_norm, x=f"{feat_viz}_scaled", nbins=12,
+                                    title=f"{feat_viz} — după StandardScaler",
+                                    color_discrete_sequence=["#00d4ff"])
+            fig_norm.update_layout(**PLOT_LAYOUT)
+            st.plotly_chart(fig_norm, use_container_width=True)
+
+        sc_stats = pd.DataFrame({
+            "Feature": feats_sc,
+            "Medie originală": sc_demo.mean_.round(2),
+            "Std originală":   sc_demo.scale_.round(2),
+            "Medie scalată":   X_sc.mean(axis=0).round(4),
+            "Std scalată":     X_sc.std(axis=0).round(4),
+        })
+        st.dataframe(sc_stats, use_container_width=True, hide_index=True)
+        st.markdown('<div class="insight-box">📐 <b>StandardScaler</b> elimină dominanța variabilelor cu magnitudine mare: '
+                    'fără scalare, <b>putere_mw</b> (range 1.036) ar domina complet față de '
+                    '<b>factor_utilizare</b> (range 0.44) în KMeans. '
+                    'Scalarea asigură că fiecare feature contribuie proporțional la distanța euclidiană.</div>',
+                    unsafe_allow_html=True)
+
+    # ── TAB 4: Statistici descriptive ────────────────────────────────────────
+    with tabs[3]:
         st.markdown("#### Statistici Descriptive — Date Financiare Consolidate")
         cols_stat = ["venituri_totale","profit_net","ebitda","marja_ebitda_pct",
                      "roe_pct","roa_pct","rata_curenta","rata_datorii_capitaluri"]
@@ -888,6 +936,56 @@ elif sectiune == "🔵 Clustering Centrale":
         "text/csv",
         key="dl_clusters",
     )
+
+    # ── Radar chart — profilul fiecărui cluster ──────────────────────────────
+    st.markdown("#### Profilul Clusterelor — Hartă Radar")
+    radar_features = ["putere_mw", "productie_gwh_an", "factor_utilizare", "an_punere_functiune"]
+    radar_labels   = ["Putere MW", "Producție GWh", "Factor utilizare", "An PIF (inv.)"]
+
+    profile = df_centrale_cl.groupby("cluster_label")[radar_features].mean()
+    # Normalizare min-max per feature (0–1) + inversat an_punere_functiune (mai nou = mai mare)
+    profile_norm = profile.copy()
+    for feat in radar_features:
+        mn, mx = profile[feat].min(), profile[feat].max()
+        if mx > mn:
+            profile_norm[feat] = (profile[feat] - mn) / (mx - mn)
+        else:
+            profile_norm[feat] = 0.5
+    profile_norm["an_punere_functiune"] = 1 - profile_norm["an_punere_functiune"]
+
+    fig_radar = go.Figure()
+    for i, (cl_name, row) in enumerate(profile_norm.iterrows()):
+        vals = list(row[radar_features]) + [row[radar_features[0]]]
+        fig_radar.add_trace(go.Scatterpolar(
+            r=vals,
+            theta=radar_labels + [radar_labels[0]],
+            fill="toself",
+            fillcolor=f"rgba({int(COLORS[i][1:3],16)},{int(COLORS[i][3:5],16)},{int(COLORS[i][5:7],16)},0.15)",
+            line=dict(color=COLORS[i], width=2),
+            name=cl_name,
+        ))
+    fig_radar.update_layout(
+        **{k: v for k, v in PLOT_LAYOUT.items() if k != "xaxis" and k != "yaxis"},
+        polar=dict(
+            bgcolor="#0d1528",
+            radialaxis=dict(visible=True, range=[0, 1], tickfont=dict(color="#6b8fb5"), gridcolor="#1a2e4a"),
+            angularaxis=dict(tickfont=dict(color="#b8d4ec"), gridcolor="#1a2e4a"),
+        ),
+        title="Profil normalizat per cluster (0=minim, 1=maxim în cohortă)",
+        height=420,
+    )
+    st.plotly_chart(fig_radar, use_container_width=True)
+
+    # ── Centrale per cluster ─────────────────────────────────────────────────
+    with st.expander("📋 Centrale grupate per cluster", expanded=True):
+        for cl in sorted(df_centrale_cl["cluster_label"].unique()):
+            df_cl_sub = df_centrale_cl[df_centrale_cl["cluster_label"] == cl][
+                ["nume", "rau", "judet", "tip", "putere_mw", "productie_gwh_an",
+                 "an_punere_functiune", "factor_utilizare"]
+            ].sort_values("putere_mw", ascending=False).reset_index(drop=True)
+            df_cl_sub["factor_utilizare"] = df_cl_sub["factor_utilizare"].round(3)
+            st.markdown(f"**{cl}** — {len(df_cl_sub)} centrale")
+            st.dataframe(df_cl_sub, use_container_width=True, hide_index=True)
 
     # Distributie clustere pe judete
     fig_jud = px.histogram(df_centrale_cl, x="judet", color="cluster_label",
@@ -1465,24 +1563,33 @@ elif sectiune == "📈 Regresie Multiplă":
             st.plotly_chart(fig_c_res, use_container_width=True)
 
         pred_c_ci = model_c.get_prediction(X_c).conf_int(alpha=0.05)
-        xi_c = df_c_ols["putere_mw"].tolist()
+
+        # Sortare dupa putere_mw pentru IC band continuu
+        sort_idx  = np.argsort(df_c_ols["putere_mw"].values)
+        xi_sorted = df_c_ols["putere_mw"].values[sort_idx]
+        ci_sorted = pred_c_ci[sort_idx]
+        fv_sorted = model_c.fittedvalues.values[sort_idx]
+
         fig_ci_c = go.Figure()
+        # Banda IC 95% (desenata prima ca sa fie sub celelalte trace-uri)
+        fig_ci_c.add_trace(go.Scatter(
+            x=np.concatenate([xi_sorted, xi_sorted[::-1]]),
+            y=np.concatenate([ci_sorted[:, 1], ci_sorted[:, 0][::-1]]),
+            fill="toself", fillcolor="rgba(255,107,53,0.15)",
+            line=dict(color="rgba(255,107,53,0)"), name="IC 95%",
+        ))
+        # Linie de regresie OLS sortata
+        fig_ci_c.add_trace(go.Scatter(
+            x=xi_sorted, y=fv_sorted,
+            mode="lines", line=dict(color="#ff6b35", width=2, dash="dash"),
+            name="Dreapta OLS",
+        ))
+        # Puncte reale
         fig_ci_c.add_trace(go.Scatter(
             x=df_c_ols["putere_mw"], y=y_c, mode="markers+text",
             text=df_c_ols["nume"], textposition="top center",
             textfont=dict(size=7, color="#6b8fb5"),
             marker=dict(color=COLORS[0], size=10), name="Producție reală",
-        ))
-        fig_ci_c.add_trace(go.Scatter(
-            x=df_c_ols["putere_mw"], y=model_c.fittedvalues,
-            mode="markers", marker=dict(color="#ff6b35", size=8, symbol="diamond"),
-            name="Fitted OLS",
-        ))
-        fig_ci_c.add_trace(go.Scatter(
-            x=xi_c + xi_c[::-1],
-            y=pred_c_ci[:, 1].tolist() + pred_c_ci[:, 0].tolist()[::-1],
-            fill="toself", fillcolor="rgba(255,107,53,0.12)",
-            line=dict(color="rgba(255,107,53,0)"), name="IC 95%",
         ))
         fig_ci_c.update_layout(**PLOT_LAYOUT,
                                title="Putere instalată vs. Producție + IC 95%",
@@ -1568,26 +1675,25 @@ elif sectiune == "📈 Regresie Multiplă":
             "<i>fără factor_utilizare / productie_per_mw (circulare față de target)</i></p>",
             unsafe_allow_html=True)
 
-        # ── Build dataset ──────────────────────────────────────────────────
-        df_ml = df_centrale.copy()
-        df_ml["factor_utilizare"] = df_ml["productie_gwh_an"] / (df_ml["putere_mw"] * 8760)
-        df_ml["productie_per_mw"] = df_ml["productie_gwh_an"] / df_ml["putere_mw"]
+        # ── Build dataset ──
+        df_ml = pd.read_csv("date/hidroelectrica_centrale.csv")
         df_ml["pe_dunare"] = df_ml["nume"].str.lower().str.contains(
             "por[tț]ile de fier", na=False, regex=True).astype(int)
         le_ml = LabelEncoder()
         df_ml["tip_enc"] = le_ml.fit_transform(df_ml["tip"])
 
-        # Clustering fara target (productie_gwh_an) si fara variabile derivate din el
         _feats_km = ["putere_mw", "an_punere_functiune", "tip_enc"]
         _sc_km = StandardScaler()
         _X_km = _sc_km.fit_transform(df_ml[_feats_km])
         _km4 = KMeans(n_clusters=4, random_state=42, n_init=10)
         df_ml["cluster"] = _km4.fit_predict(_X_km)
 
-        # Features fara data leakage: excluse factor_utilizare si productie_per_mw
-        # (ambele sunt functii directe ale targetului productie_gwh_an)
-        FEAT_NAMES  = ["putere_mw", "an_punere_functiune", "pe_dunare", "tip_enc", "cluster"]
-        FEAT_LABELS = ["Putere MW", "An PIF", "Pe Dunăre", "Tip centrală", "Cluster K-Means"]
+        # Excludem Portile de Fier I & II — outlieri extremi (1400–5200 GWh vs. ~150 GWh medie)
+        # care destabilizează LOO CV pe n=30
+        df_ml = df_ml[df_ml["pe_dunare"] == 0].reset_index(drop=True)
+
+        FEAT_NAMES  = ["putere_mw", "an_punere_functiune", "tip_enc", "cluster"]
+        FEAT_LABELS = ["Putere MW", "An PIF", "Tip centrală", "Cluster K-Means"]
 
         X_ml     = df_ml[FEAT_NAMES].values
         y_ml     = df_ml["productie_gwh_an"].values
@@ -1635,6 +1741,8 @@ elif sectiune == "📈 Regresie Multiplă":
 
         # ── Metrics comparison ────────────────────────────────────────────
         st.markdown("#### Comparație modele — LOO CV · metrici în GWh originali")
+        st.caption("n=28 centrale (Portile de Fier I & II excluse — outlieri extremi: 1.400–5.200 GWh față de media de ~150 GWh)")
+
         cols_m = st.columns(len(results))
         for idx, (name, (_, mae, rmse, r2, col)) in enumerate(results.items()):
             with cols_m[idx]:
@@ -2073,3 +2181,301 @@ elif sectiune == "⚡ Mix Energetic Live":
                          use_container_width=True)
 
             st.markdown('<div class="insight-box">💧 <b>Notă:</b> Hidro România ≈ 90% Hidroelectrica S.A. — producția hidroelectrică din SEN reflectă direct performanța operațională a companiei. Rezoluție ~6h/citire · sursa: sistemulenergetic.ro</div>', unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11. SIMULATOR DECIZIONAL
+# ═══════════════════════════════════════════════════════════════════════════
+elif sectiune == "🖥️ Simulator Decizional":
+    st.markdown('<div class="section-header">🖥️ Simulator Decizional</div>', unsafe_allow_html=True)
+    st.markdown("<p style='color:#6b8fb5;'>Flux decizional: calitate date → EDA → selecție model → predicție → scenarii</p>", unsafe_allow_html=True)
+
+    tab_cal, tab_eda, tab_model, tab_pred, tab_scen = st.tabs([
+        "📥 Date & Calitate", "🔍 EDA Rapid", "⚙️ Selectare Model",
+        "🏭 Predicție Centrală Nouă", "📊 Scenarii Comparate"
+    ])
+
+    # ── TAB 1: Date & Calitate ────────────────────────────────────────────────
+    with tab_cal:
+        datasets_cal = {
+            "Consolidat 2021–2025": df_main,
+            "Individual 2023–2025": df_indiv,
+            "Segmente 2023–2025": df_seg,
+            "Macro-operaționale": df_macro,
+            "Centrale hidroelectrice": df_centrale,
+            "Dataset complet": df_complet,
+            "Cashflow 2024–2025": df_cf,
+        }
+        quality_rows = []
+        for ds_name, df_q in datasets_cal.items():
+            n_cells = df_q.shape[0] * df_q.shape[1]
+            completeness = (1 - df_q.isnull().sum().sum() / n_cells) * 100 if n_cells > 0 else 100.0
+            quality_rows.append({
+                "Dataset": ds_name,
+                "Rânduri": df_q.shape[0],
+                "Coloane": df_q.shape[1],
+                "Completitudine %": round(completeness, 1),
+                "Valori lipsă": int(df_q.isnull().sum().sum()),
+            })
+        df_qual = pd.DataFrame(quality_rows)
+        overall_score = df_qual["Completitudine %"].mean()
+        freshness_yr  = int(df_main["an"].max())
+
+        cq1, cq2, cq3 = st.columns(3)
+        cq1.metric("Data Health Score", f"{overall_score:.1f}%",
+                   delta="Excelent" if overall_score > 95 else "Bun")
+        cq2.metric("Total datasets", len(datasets_cal))
+        cq3.metric("An cel mai recent", freshness_yr)
+
+        fig_qual = px.bar(
+            df_qual, x="Dataset", y="Completitudine %",
+            color="Completitudine %",
+            color_continuous_scale=["#ff5252", "#ffaa00", "#00e676"],
+            range_y=[90, 101],
+            title="Completitudine per Dataset (%)",
+        )
+        fig_qual.add_hline(y=95, line_dash="dot", line_color="#ffaa00",
+                           annotation_text="Prag 95%", annotation_font_color="#ffaa00")
+        fig_qual.update_layout(**PLOT_LAYOUT, coloraxis_showscale=False)
+        st.plotly_chart(fig_qual, use_container_width=True)
+        st.dataframe(df_qual, use_container_width=True, hide_index=True)
+        csv_qual = df_qual.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Export raport calitate CSV", csv_qual, "calitate_date.csv", "text/csv")
+
+    # ── TAB 2: EDA Rapid ─────────────────────────────────────────────────────
+    with tab_eda:
+        df_eda = df_main.merge(df_macro, on="an", how="inner")
+        num_cols_eda = [c for c in df_eda.select_dtypes(include=[np.number]).columns if c != "an"]
+
+        col_x_eda = st.selectbox(
+            "Variabilă de analizat",
+            num_cols_eda,
+            index=num_cols_eda.index("venituri_totale") if "venituri_totale" in num_cols_eda else 0,
+            key="eda_col_x",
+        )
+        ce1, ce2 = st.columns(2)
+        with ce1:
+            fig_hist = px.histogram(df_eda, x=col_x_eda, nbins=5,
+                                    title=f"Distribuție — {col_x_eda}",
+                                    color_discrete_sequence=["#00d4ff"])
+            fig_hist.update_layout(**PLOT_LAYOUT)
+            st.plotly_chart(fig_hist, use_container_width=True)
+        with ce2:
+            fig_box_eda = px.box(df_eda, y=col_x_eda, points="all",
+                                 title=f"Boxplot — {col_x_eda}",
+                                 color_discrete_sequence=["#00d4ff"])
+            fig_box_eda.update_layout(**PLOT_LAYOUT)
+            st.plotly_chart(fig_box_eda, use_container_width=True)
+
+        if "profit_net" in df_eda.columns:
+            corr_all  = df_eda[num_cols_eda].corr()["profit_net"].drop("profit_net", errors="ignore")
+            corr_top5 = corr_all.abs().nlargest(5)
+            corr_show = corr_all[corr_top5.index].reset_index()
+            corr_show.columns = ["Variabilă", "Pearson r cu profit_net"]
+            fig_corr = px.bar(
+                corr_show, x="Pearson r cu profit_net", y="Variabilă", orientation="h",
+                color="Pearson r cu profit_net",
+                color_continuous_scale=["#ff5252", "#0d1528", "#00e676"],
+                range_color=[-1, 1],
+                title="Top 5 corelații cu Profit Net",
+            )
+            fig_corr.update_layout(**PLOT_LAYOUT, coloraxis_showscale=True)
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+        col_y_eda = st.selectbox(
+            "Axa Y (scatter)", num_cols_eda,
+            index=num_cols_eda.index("productie_hidro_gwh") if "productie_hidro_gwh" in num_cols_eda else 1,
+            key="eda_col_y",
+        )
+        fig_sc_eda = px.scatter(
+            df_eda, x=col_x_eda, y=col_y_eda, text="an",
+            trendline="ols",
+            color_discrete_sequence=["#00d4ff"],
+            title=f"{col_x_eda} vs. {col_y_eda}",
+        )
+        fig_sc_eda.update_traces(textposition="top center", marker_size=12)
+        fig_sc_eda.update_layout(**PLOT_LAYOUT)
+        st.plotly_chart(fig_sc_eda, use_container_width=True)
+
+    # ── TAB 3: Selectare Model ────────────────────────────────────────────────
+    with tab_model:
+        st.markdown("**LOO Cross-Validation pe n=30 centrale — comparație modele**")
+        with st.spinner("Prima rulare: LOO CV (~5s)..."):
+            df_res_ml, feat_imp_ml, rf_ml, sc_rf_ml, le_ml, km4_ml, sc_km_ml, feats_ml, mae_rf_ml = _get_central_ml_models()
+        best_ml = df_res_ml.loc[df_res_ml["R² LOO"].idxmax(), "Model"]
+        cm1, cm2 = st.columns([2, 1])
+        with cm1:
+            st.dataframe(df_res_ml, use_container_width=True, hide_index=True)
+        with cm2:
+            st.markdown(
+                f'<div class="insight-box">✅ <b>Model recomandat:</b><br>'
+                f'<b style="color:#00e676;font-size:1.2rem;">{best_ml}</b><br>'
+                f'Cel mai bun R² LOO</div>',
+                unsafe_allow_html=True
+            )
+        fi_df = pd.DataFrame({
+            "Feature": list(feat_imp_ml.keys()),
+            "Importanță": list(feat_imp_ml.values()),
+        }).sort_values("Importanță")
+        fig_fi = px.bar(
+            fi_df, x="Importanță", y="Feature", orientation="h",
+            color="Importanță",
+            color_continuous_scale=["#0d1528", "#1e3a5f", "#00d4ff"],
+            title="Feature Importance — Random Forest",
+        )
+        fig_fi.update_layout(**PLOT_LAYOUT, coloraxis_showscale=False)
+        st.plotly_chart(fig_fi, use_container_width=True)
+
+    # ── TAB 4: Predicție Centrală Nouă ────────────────────────────────────────
+    with tab_pred:
+        st.markdown("#### Predicție producție pentru o centrală nouă sau ipotetică")
+        cp1, cp2 = st.columns(2)
+        with cp1:
+            mw_pred  = st.number_input("Putere instalată (MW)", min_value=10, max_value=1200, value=200, step=10)
+            an_pred  = st.number_input("An punere în funcțiune", min_value=1950, max_value=2030, value=2025)
+        with cp2:
+            tip_pred = st.selectbox("Tip centrală", ["acumulare", "firul_apei", "fluvial"])
+            dun_pred = st.checkbox("Centrală pe Dunăre?")
+
+        if st.button("🔮 Calculează predicție", type="primary"):
+            with st.spinner("Calculez predicție..."):
+                _, _, rf_p, sc_rf_p, le_p, km4_p, sc_km_p, feats_p, mae_p = _get_central_ml_models()
+                tip_enc_val = int(le_p.transform([tip_pred])[0])
+                new_km_in   = sc_km_p.transform([[mw_pred, an_pred, tip_enc_val]])
+                cluster_val = int(km4_p.predict(new_km_in)[0])
+                pe_dun_val  = 1 if dun_pred else 0
+                new_row     = sc_rf_p.transform([[mw_pred, an_pred, pe_dun_val, tip_enc_val, cluster_val]])
+                pred_gwh    = float(np.expm1(rf_p.predict(new_row)[0]))
+                pret_mediu  = float(df_macro["pret_mediu_energie_ron_mwh"].mean())
+                venituri_e  = pred_gwh * pret_mediu / 1000
+
+            pr1, pr2, pr3 = st.columns(3)
+            pr1.metric("Producție estimată (GWh/an)", f"{pred_gwh:,.0f}")
+            pr2.metric("MAE model RF (±GWh)", f"±{mae_p:.0f}")
+            pr3.metric("Venituri estimate", f"{venituri_e:.2f} mld RON")
+
+            st.markdown(
+                f'<div class="insight-box">🏭 <b>Centrală {tip_pred} · {mw_pred} MW · {an_pred}:</b> '
+                f'Producție estimată <b>{pred_gwh:,.0f} GWh/an</b> '
+                f'(MAE model RF din LOO CV: ±{mae_p:.0f} GWh). '
+                f'Cluster K-Means asignat: <b>{cluster_val}</b>. '
+                f'Venituri estimate la prețul mediu 2021–2025 ({pret_mediu:.0f} RON/MWh): '
+                f'<b>{venituri_e:.2f} mld RON/an</b>.</div>',
+                unsafe_allow_html=True
+            )
+            similar = df_centrale[
+                (df_centrale["tip"] == tip_pred) &
+                (df_centrale["putere_mw"].between(mw_pred * 0.8, mw_pred * 1.2))
+            ][["nume","putere_mw","productie_gwh_an","an_punere_functiune"]].rename(
+                columns={"nume":"Centrală","putere_mw":"MW",
+                         "productie_gwh_an":"GWh/an","an_punere_functiune":"An PIF"}
+            )
+            if not similar.empty:
+                st.markdown("**Centrale similare din portofoliu (±20% MW, același tip):**")
+                st.dataframe(similar, use_container_width=True, hide_index=True)
+        else:
+            st.info("Completați parametrii și apăsați **Calculează predicție**.")
+
+    # ── TAB 5: Scenarii Comparate ─────────────────────────────────────────────
+    with tab_scen:
+        st.markdown("#### Scenarii financiare comparate")
+        _pret_e     = float(df_macro["pret_mediu_energie_ron_mwh"].mean())
+        _prod_medie = float(df_macro["productie_hidro_gwh"].mean())
+
+        st.markdown("**Configurare scenarii (editabil):**")
+        sc1_col, sc2_col, sc3_col = st.columns(3)
+        with sc1_col:
+            st.markdown("**🔵 Scenariu Bază**")
+            idx_baza     = st.slider("Index hidro", 70, 130, 90, 5, key="s_baza_hidro")
+            mw_sol_baza  = st.slider("MW solar adăugat", 0, 1000, 0, 50, key="s_baza_sol")
+            mw_eol_baza  = st.slider("MW eolian adăugat", 0, 500, 0, 50, key="s_baza_eol")
+        with sc2_col:
+            st.markdown("**🔴 Scenariu Secetă**")
+            idx_sece     = st.slider("Index hidro", 50, 100, 70, 5, key="s_sece_hidro")
+            mw_sol_sece  = st.slider("MW solar adăugat", 0, 1000, 0, 50, key="s_sece_sol")
+            mw_eol_sece  = st.slider("MW eolian adăugat", 0, 500, 0, 50, key="s_sece_eol")
+        with sc3_col:
+            st.markdown("**🟢 Scenariu Extindere**")
+            idx_ext      = st.slider("Index hidro", 70, 130, 90, 5, key="s_ext_hidro")
+            mw_sol_ext   = st.slider("MW solar adăugat", 0, 1000, 500, 50, key="s_ext_sol")
+            mw_eol_ext   = st.slider("MW eolian adăugat", 0, 500, 200, 50, key="s_ext_eol")
+
+        def _calc_scenario(idx_hidro, mw_solar, mw_eolian):
+            prod_h   = _prod_medie * (idx_hidro / 90)
+            prod_s   = mw_solar  * 8760 * 0.17 / 1000
+            prod_w   = mw_eolian * 8760 * 0.30 / 1000
+            prod_tot = prod_h + prod_s + prod_w
+            venituri = prod_tot * _pret_e / 1000
+            pct_non  = (prod_s + prod_w) / prod_tot * 100 if prod_tot > 0 else 0.0
+            risc     = max(0.0, (90 - idx_hidro) / 90 * 100)
+            return {
+                "Producție hidro (GWh)":      round(prod_h, 0),
+                "Producție solar (GWh)":       round(prod_s, 0),
+                "Producție eolian (GWh)":      round(prod_w, 0),
+                "Producție totală (GWh)":      round(prod_tot, 0),
+                "Venituri estimate (mld RON)": round(venituri, 2),
+                "% producție non-hidro":       round(pct_non, 1),
+                "Risc secetă (0–100)":         round(risc, 0),
+            }
+
+        s_baza = _calc_scenario(idx_baza, mw_sol_baza, mw_eol_baza)
+        s_sece = _calc_scenario(idx_sece, mw_sol_sece, mw_eol_sece)
+        s_ext  = _calc_scenario(idx_ext,  mw_sol_ext,  mw_eol_ext)
+
+        df_scen = pd.DataFrame({
+            "Indicator":    list(s_baza.keys()),
+            "🔵 Bază":      list(s_baza.values()),
+            "🔴 Secetă":    list(s_sece.values()),
+            "🟢 Extindere": list(s_ext.values()),
+        })
+        st.dataframe(df_scen, use_container_width=True, hide_index=True)
+
+        cats_radar = ["Venituri", "Stabilitate", "Diversificare", "Anti-risc"]
+        def _norm_scen(s):
+            return [
+                min(s["Venituri estimate (mld RON)"] / 15.0, 1) * 5,
+                (1 - s["Risc secetă (0–100)"] / 100) * 5,
+                min(s["% producție non-hidro"] / 30.0, 1) * 5,
+                (1 - s["Risc secetă (0–100)"] / 100) * 5,
+            ]
+
+        _fill = {"Bază": "rgba(0,212,255,0.15)", "Secetă": "rgba(255,82,82,0.15)", "Extindere": "rgba(0,230,118,0.15)"}
+        _line = {"Bază": "#00d4ff", "Secetă": "#ff5252", "Extindere": "#00e676"}
+        fig_radar = go.Figure()
+        for _name, _scen in [("Bază", s_baza), ("Secetă", s_sece), ("Extindere", s_ext)]:
+            _vals = _norm_scen(_scen)
+            fig_radar.add_trace(go.Scatterpolar(
+                r=_vals + [_vals[0]],
+                theta=cats_radar + [cats_radar[0]],
+                fill="toself",
+                name=_name,
+                line=dict(color=_line[_name], width=2),
+                fillcolor=_fill[_name],
+            ))
+        fig_radar.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 5], gridcolor="#1e3a5f",
+                                tickfont=dict(color="#6b8fb5")),
+                angularaxis=dict(gridcolor="#1e3a5f", tickfont=dict(color="#b8d4ec")),
+                bgcolor="#0d1528",
+            ),
+            paper_bgcolor="#0a0f1e",
+            font=dict(color="#b8d4ec"),
+            legend=dict(bgcolor="#0d1528"),
+            title=dict(text="Radar Scenarii — Venituri / Stabilitate / Diversificare / Anti-risc",
+                       font=dict(color="#e8f4fd")),
+            height=450,
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+        csv_scen = df_scen.to_csv(index=False).encode("utf-8")
+        st.download_button("📄 Export scenarii CSV", csv_scen, "scenarii_comparate.csv", "text/csv")
+        st.markdown(
+            f'<div class="insight-box">📊 <b>Scenarii comparate:</b> '
+            f'Scenariu Extindere (+{mw_sol_ext} MW solar, +{mw_eol_ext} MW eolian) '
+            f'aduce producția non-hidro la <b>{s_ext["% producție non-hidro"]:.1f}%</b> '
+            f'față de <b>{s_baza["% producție non-hidro"]:.1f}%</b> în scenariu de bază. '
+            f'Graficul radar normalizat 0–5: Venituri (max 15 mld RON = 5), '
+            f'Stabilitate/Anti-risc (inversul riscului de secetă), '
+            f'Diversificare (% non-hidro / 30%).</div>',
+            unsafe_allow_html=True
+        )

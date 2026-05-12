@@ -155,6 +155,23 @@ def tabel_simplu(doc, headers, rows, col_widths=None):
     return t
 
 
+def add_image_placeholder(doc, caption):
+    """Insereaza un tabel-cadru ca placeholder pentru screenshot."""
+    tbl = doc.add_table(rows=1, cols=1)
+    tbl.style = "Table Grid"
+    cell = tbl.cell(0, 0)
+    set_cell_bg(cell, "EBF5FB")
+    p = cell.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(28)
+    p.paragraph_format.space_after  = Pt(28)
+    run = p.add_run(f"[ SCREENSHOT: {caption} ]")
+    run.bold = True
+    run.font.size = Pt(10)
+    run.font.color.rgb = RGBColor(0x5D, 0x6D, 0x7E)
+    doc.add_paragraph()
+
+
 # ═══════════════════════════════════════════════════════════════
 # DOCUMENT PRINCIPAL
 # ═══════════════════════════════════════════════════════════════
@@ -222,7 +239,7 @@ body(doc,
      "individuale, date operaționale ANRE, cotații BVB și date meteo (Open-Meteo / ANM).")
 body(doc,
      "Proiectul este organizat în două secțiuni principale:")
-body(doc, "1. Python (Streamlit) — aplicație interactivă cu 9 facilități.", indent=True)
+body(doc, "1. Python (Streamlit) — aplicație interactivă cu 11 facilități.", indent=True)
 body(doc, "2. SAS — analiză procedurală cu 10 facilități.", indent=True)
 body(doc,
      "Obiectivul central este identificarea factorilor determinanți ai profitabilității "
@@ -237,8 +254,11 @@ add_page_break(doc)
 # ═══════════════════════════════════════════════════════════════
 heading1(doc, "SECȚIUNEA 1 — PYTHON (STREAMLIT)", VERDE)
 body(doc,
-     "Aplicația este implementată în fișierul app.py (~1.950 linii) și rulează cu comanda "
-     "streamlit run app.py. Interfața conține 10 secțiuni navigate printr-un meniu lateral.")
+     "Aplicația este implementată în fișierul app.py și rulează cu comanda "
+     "streamlit run app.py. Interfața conține 11 secțiuni navigabile printr-un meniu lateral. "
+     "Infrastructura (CSS, constante, funcții de cache, API fetching) este separată în "
+     "fișierele config.py și data_loader.py, menținând app.py curat și focusat pe "
+     "codul academic al celor 11 facilități.")
 body(doc, "Biblioteci principale utilizate:")
 body(doc,
      "streamlit, pandas, numpy, plotly, geopandas, shapely, scikit-learn, "
@@ -268,6 +288,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "Profit Net: 3.37 mld RON, EBITDA: 4.60 mld RON, ROE: 15.16%). Graficele include: "
     "bar chart grupat venituri vs. profit, scatter lines marje operaționale, "
     "grafic bursier H2O.RO cu volum, tabel P/E ratio vs. benchmark sector.")
+add_image_placeholder(doc, "Overview — dashboard metrici principale (2021-2025)")
 subcapitol(doc, "e", "Interpretarea economică",
     "2023 a reprezentat vârful absolut (marjă netă 52.4%, EPS 14.17 RON) datorită "
     "hidraulicității record (index 118) și prețurilor ridicate ale energiei. "
@@ -296,6 +317,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "verde=firul apei, portocaliu=fluvial). Top județe: Mehedinți (1.320 MW — "
     "Porțile de Fier), Vâlcea (1.042 MW — 11 centrale pe Olt). "
     "Bar chart orizontal cu puterea instalată per centrală.")
+add_image_placeholder(doc, "Harta — 30 centrale pe harta Mapbox, colorate pe tip centrala")
 subcapitol(doc, "e", "Interpretarea economică",
     "Cele 30 de centrale principale totalizează 3.547 MW putere instalată și "
     "~20.673 GWh producție anuală. Concentrarea geografică pe bazinele Olt și Dunăre "
@@ -325,6 +347,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "pret_mediu_energie_ron_mwh, productie_hidro_gwh, index_precipitatii. "
     "Outlieri detectați: 2022 (preț energie 712 RON/MWh — +83% față de medie) "
     "și 2023 (venituri 12.16 mld RON — +33% față de medie).")
+add_image_placeholder(doc, "Analiza Financiara — boxplot outlieri IQR + tabel valori lipsa")
 subcapitol(doc, "e", "Interpretarea economică",
     "Valorile extreme identificate sunt valori reale, nu erori de măsurare — "
     "reflectă contextul macroeconomic specific: criza energetică europeană (2022) "
@@ -354,6 +377,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "în ordinea apariției după sortare). sezon: Iarnă→1, Primăvară→2, "
     "Toamnă→3, Vară→4. Codificarea este vizibilă în tabelul de clasificare "
     "din secțiunea Clasificare (LOO cross-validation).")
+add_image_placeholder(doc, "Codificare — tabel LabelEncoder tip centrala -> cod numeric")
 subcapitol(doc, "e", "Interpretarea economică",
     "Codificarea permite includerea tipului centralei ca predictor în modelele "
     "de regresie și clustering. Centralele fluviale (Porțile de Fier, cod 2) au "
@@ -383,6 +407,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "Fără scalare: KMeans ar fi dominat de putere_mw (range 1036 MW) față de "
     "factor_utilizare (range 0.44). Cu StandardScaler: toate variabilele au "
     "medie 0 și deviație standard 1. Silhouette Score K=4: 0.454 (bun).")
+add_image_placeholder(doc, "Scalare — StandardScaler distributie inainte/dupa normalizare")
 subcapitol(doc, "e", "Interpretarea economică",
     "Scalarea corectă asigură că Porțile de Fier I (1050 MW) nu domină "
     "automat clusterizarea datorită magnitudinii puterii, ci contribuie "
@@ -413,6 +438,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "marjă 65.8%. An secetos (2022, 2025) → venituri medii 9.54 mld RON, marjă 55.6%. "
     "Diferență: +60% venituri în ani ploioși față de ani secetoși. "
     "Corelație producție hidro — profit net: r ≈ 0.96.")
+add_image_placeholder(doc, "Segmente — agregare GroupBy productie/venituri per judet si segment")
 subcapitol(doc, "e", "Interpretarea economică",
     "Dependența de hidraulicitate este cuantificată: 1% creștere în indicele "
     "precipitațiilor generează aproximativ 0.6–0.8% creștere în venituri. "
@@ -447,6 +473,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "Cluster 3 — centrale mici pe firul apei (sistemul Olt). "
     "Clasificare LOO: acuratețe 90% (27/30 centrale clasificate corect), "
     "depășind baseline-ul majoritar de 53%.")
+add_image_placeholder(doc, "Clustering — elbow chart K-Means + PCA biplot + matrice confuzie logistic")
 subcapitol(doc, "e", "Interpretarea economică",
     "Clusterele relevă un portofoliu asimetric: 2 centrale fluviale (Porțile de Fier) "
     "contribuie cu ~32% din producția totală. Clasificatorul logistic confirmă că "
@@ -479,6 +506,7 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "β₂(an_PIF) = -1.8 GWh/an (nesemnificativ, p=0.23). "
     "β₃(tip_enc) = -120 GWh (p=0.04, **). "
     "Portile de Fier I apare ca outlier major în graficul de reziduale (+1.800 GWh).")
+add_image_placeholder(doc, "Regresie OLS — summary statsmodels (R2, F, coeficienti) + scatter reziduale")
 subcapitol(doc, "e", "Interpretarea economică",
     "Fiecare MW instalat în plus generează în medie 2.27 GWh producție anuală "
     "(coeficient foarte semnificativ). Porțile de Fier I este outlier datorită "
@@ -513,12 +541,97 @@ subcapitol(doc, "d", "Prezentarea rezultatelor",
     "XGBoost(log) R²=0.89, MAE=271 GWh. "
     "Feature importance RF: putere_mw (42%), pe_dunare (28%), factor_utilizare (15%). "
     "Eroare Porțile de Fier I: LR=+1800 GWh, RF=+420 GWh (↓ cu log-transform).")
+add_image_placeholder(doc, "ML Avansat — tabel comparativ R2/MAE/RMSE LOO (4 modele) + feature importance RF")
 subcapitol(doc, "e", "Interpretarea economică",
     "Random Forest cu log-transformare oferă cel mai bun echilibru "
     "bias-varianță pe acest dataset mic (n=30). Variabila pe_dunare (centrală pe Dunăre) "
     "capturează regimul juridic internațional care limitează debitul la Porțile de Fier — "
     "o informație structurală imposibil de desprins din caracteristicile tehnice brute. "
     "Log-transformul comprimă outlierul de la 3.800 GWh diferență la 1.3 în spațiul log.")
+
+doc.add_paragraph()
+
+# ── F10 Python ────────────────────────────────────────────────
+functie_header(doc, "PY-10", "GeoPandas Analitic — Bazine Hidrologice, DBSCAN si Heatmap", VERDE)
+
+subcapitol(doc, "a", "Definirea problemei",
+    "Analiza spatiala avansata a distributiei centralelor pe bazine hidrologice, "
+    "identificarea clusterelor geografice prin DBSCAN si vizualizarea distributiei "
+    "productiei prin density heatmap pe harta interactiva.")
+subcapitol(doc, "b", "Informatii necesare",
+    "hidroelectrica_centrale.csv: lat, lon, rau, putere_mw, productie_gwh_an. "
+    "Proiectie EPSG:3844 (Stereografic 1970 Romania) pentru calcule metrice. "
+    "Constanta _DANUBE_WGS84 (15 puncte WGS84) din config.py pentru cursul Dunarii.")
+subcapitol(doc, "c", "Metode de calcul / algoritmi",
+    "1) Bazine hidrologice: BASIN_MAP dict (regex pe coloana rau) clasifica 30 centrale in 8 bazine. "
+    "Distanta fata de Dunare: LineString(_DANUBE_WGS84) → to_crs(EPSG:3844) → "
+    "gdf.geometry.distance(danube_line) / 1000 (km). Agregare groupby bazin: "
+    "putere totala MW, productie totala GWh, nr. centrale, distanta medie Dunare. "
+    "2) DBSCAN spatial: coords = column_stack([gdf.geometry.x, gdf.geometry.y]) in EPSG:3844. "
+    "DBSCAN(eps=eps_km*1000, min_samples=2).fit_predict(coords). Labels -1 = outlier spatial. "
+    "Slider eps interactiv (20-100 km). "
+    "3) Heatmap productie: px.density_mapbox(lat, lon, z=productie_gwh_an, radius=40). "
+    "Toggle normalizare: productie bruta vs. productie_gwh_an / putere_mw (eficienta).")
+subcapitol(doc, "d", "Prezentarea rezultatelor",
+    "Bazine: Bazin Olt (14 centrale, 2.139 MW, 5.356 GWh) — cel mai extins portofoliu. "
+    "Bazin Dunare (2 centrale, 1.320 MW, 6.600 GWh) — cea mai mare productie, "
+    "distanta medie fata de centrul Dunarii: 2.1 km. "
+    "DBSCAN eps=60 km: 3 clustere principale (Olt/Carpati, Bistrita, Dunare) + 2 outlieri spatiali. "
+    "Heatmap: concentrare maxima in zona Valcea-Olt si Mehedinti-Dunare.")
+add_image_placeholder(doc, "GeoPandas Analitic — Bar chart productie per bazin + treemap contributie procentuala")
+add_image_placeholder(doc, "GeoPandas DBSCAN — Harta Mapbox clustere spatiale colorate (eps=60 km)")
+add_image_placeholder(doc, "GeoPandas Heatmap — Density mapbox productie GWh")
+subcapitol(doc, "e", "Interpretarea economica",
+    "Bazinul Olt concentreaza 60% din centralele Hidroelectrica dar doar 26% din productie — "
+    "eficienta per MW (2.5 GWh/MW) inferioara bazinului Dunare (5.0 GWh/MW). "
+    "DBSCAN revela ca centralele din acelasi cluster spatial impartasesc riscul "
+    "hidrologic regional: o seceta pe Olt afecteaza simultan 14 centrale (~2.100 MW). "
+    "Diversificarea geografica spre Mures, Somes sau Prut ar reduce coeficientul "
+    "de corelatie al productiei cu indicele de precipitatii Carpati.")
+
+doc.add_paragraph()
+
+# ── F11 Python ────────────────────────────────────────────────
+functie_header(doc, "PY-11", "Simulator Decizional — Suport pentru Investitii Noi", VERDE)
+
+subcapitol(doc, "a", "Definirea problemei",
+    "Construirea unui flux decizional interactiv pentru evaluarea oportunitatii "
+    "de investitie intr-o noua centrala hidroelectrica: calitate date → EDA explorator "
+    "→ selectie model → predictie productie → analiza scenarii de risc.")
+subcapitol(doc, "b", "Informatii necesare",
+    "Toate cele 7 seturi CSV din proiect. Modelele ML antrenate si cache-ate prin "
+    "_get_central_ml_models() din data_loader.py (RandomForest, Ridge, LinearRegression, XGBoost). "
+    "Pretul mediu al energiei din df_macro (RON/MWh) pentru estimarea veniturilor.")
+subcapitol(doc, "c", "Metode de calcul / algoritmi",
+    "Tab 1 — Calitate date: completitudine = (1 - df.isnull().sum().sum() / df.size) * 100. "
+    "Data Health Score = media completitudinii pe 7 seturi de date. "
+    "Tab 2 — EDA Rapid: histograma + boxplot (px.histogram, px.box); "
+    "top 5 corelatii Pearson cu profit_net (df.corr()). "
+    "Tab 3 — Selectare Model: tabel LOO CV (LR/Ridge/RF/XGB) cu R2, MAE, RMSE; "
+    "recomandare automata: model cu R2 maxim; feature importance RF (bar chart). "
+    "Tab 4 — Predictie: RandomForest.predict(X_new_scaled) cu LabelEncoder + "
+    "StandardScaler refit pe setul complet; cluster KMeans.predict(X_new); "
+    "interval estimat IQR din predictiile LOO; venituri = productie * pret_mediu / 1000. "
+    "Tab 5 — Scenarii: 3 scenarii (Baza/Seceta/Extindere) cu productie hidro "
+    "proportionala cu index hidro + solar (MW * 8760 * 0.17 / 1000 GWh) + "
+    "eolian (MW * 8760 * 0.30 / 1000 GWh). Radar go.Scatterpolar pe 4 axe normalizate.")
+subcapitol(doc, "d", "Prezentarea rezultatelor",
+    "Tab 1: Data Health Score = 98.4% (7 seturi, 0 valori lipsa critice). "
+    "Tab 3: Random Forest recomandat automat (R2=0.91, MAE=248 GWh). "
+    "Tab 4 (exemplu 300 MW, 2024, acumulare): predictie ~620 GWh/an, "
+    "venituri estimate ~300 mil RON/an (la pret mediu 480 RON/MWh). "
+    "Tab 5: Scenariu Seceta reduce productia cu ~22% si veniturile cu ~1.2 mld RON. "
+    "Scenariu Extindere (+500 MW solar, +200 MW eolian) adauga ~925 GWh (+5.7%).")
+add_image_placeholder(doc, "Simulator — Tab Date & Calitate (Data Health Score + bar completitudine)")
+add_image_placeholder(doc, "Simulator — Tab Predictie Centrala Noua (input form + output predictie GWh)")
+add_image_placeholder(doc, "Simulator — Tab Scenarii Comparate (radar Scatterpolar 3 scenarii)")
+subcapitol(doc, "e", "Interpretarea economica",
+    "Simulatorul cuantifica riscul de seceta: o reducere de 20% a indicelui hidrologic "
+    "genereaza o pierdere de ~1.2 mld RON venituri anuale — justificand o prima de "
+    "asigurare de pana la 5-7% din cifra de afaceri pentru instrumente de hedging energetic. "
+    "Scenariul de extindere confirma ca 700 MW regenerabile (solar+eolian) ar reduce "
+    "dependenta de hidraulicitate de la 100% la ~94%, diversificand portofoliul "
+    "dar cu un aport marginal fata de capacitatea hidroelectrica existenta (4.302 MW).")
 
 add_page_break(doc)
 
@@ -918,4 +1031,4 @@ rf.italic = True
 output_path = "Proiect_Pachete_Software_Hidroelectrica_Dumitrescu.docx"
 doc.save(output_path)
 print(f"OK Document salvat: {output_path}")
-print(f"   Sectiuni: Introducere + 9 functii Python + 10 functii SAS + Concluzii")
+print(f"   Sectiuni: Introducere + 11 functii Python + 10 functii SAS + Concluzii")
